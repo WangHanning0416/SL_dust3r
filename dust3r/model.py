@@ -15,7 +15,7 @@ import cv2
 
 from .utils.misc import fill_default_args, freeze_all_params, is_symmetrized, interleave, transpose_to_landscape
 from .heads import head_factory
-from dust3r.patch_embed import get_patch_embed
+from dust3r.patch_embed import get_patch_embed,PatchEmbed_Mlp
 
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
@@ -25,7 +25,8 @@ inf = float('inf')
 hf_version_number = huggingface_hub.__version__
 assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated huggingface_hub version, "
                                                                      "please reinstall requirements.txt")
-
+DECODER = False
+ENCODER = False
 
 def load_model(model_path, device, verbose=True):
     if verbose:
@@ -45,6 +46,8 @@ def load_model(model_path, device, verbose=True):
         print(s)
     return net.to(device)
 
+#TODO：缩小模型dim，不使用预训练参数
+#view：Img & pattern（备选 encoder换可学习的CNN）
 
 class PatternCNN(nn.Module):
     def __init__(self, in_channels, cnn_channels, out_dim, img_size, patch_size):
@@ -67,18 +70,8 @@ class PatternCNN(nn.Module):
             ])
             prev_channels = channels
             current_HW = current_HW // 2
-
-        # 验证尺寸匹配（避免后续融合错误）
-        assert current_HW == self.target_HW, \
-            f"Pattern CNN输出尺寸{current_HW}≠目标{self.target_HW}！请调整：\n" \
-            f"方案1：pattern/img尺寸设为 {self.target_HW * (2**len(cnn_channels))}\n" \
-            f"方案2：调整cnn_channels层数（当前{len(cnn_channels)}层）"
-
-        # 通道数调整层（1x1卷积，不改变空间尺寸）
         layers.append(nn.Conv2d(prev_channels, out_dim, kernel_size=1, stride=1, padding=0))
         layers.append(nn.BatchNorm2d(out_dim))
-
-        # 保存卷积层（作为子模块，参数可被遍历）
         self.conv_layers = nn.Sequential(*layers)
 
     def forward(self, pattern_tensor):
@@ -91,6 +84,7 @@ class PatternCNN(nn.Module):
         B, C, H, W = conv_feat.shape
         patch_feat = conv_feat.view(B, C, H*W).permute(0, 2, 1)  # 最终形状(B, N, C)
         return patch_feat
+
 
 
 class AsymmetricCroCo3DStereo (
@@ -127,12 +121,27 @@ class AsymmetricCroCo3DStereo (
 
         self.img_size = croco_kwargs.get('img_size', 224)  # 从croco参数获取图像尺寸（默认224）
         self.patch_size = croco_kwargs.get('patch_size', 16)  # 从croco参数获取patch大小（默认16）
-        self.pattern_cnn = PatternCNN(
-            in_channels=self.pattern_channels,
-            cnn_channels=self.pattern_cnn_channels,
-            out_dim=self.enc_embed_dim,  # 与图像编码器输出通道一致
+        # self.pattern_cnn = PatternCNN(
+        #     in_channels=self.pattern_channels,
+        #     cnn_channels=self.pattern_cnn_channels,
+        #     out_dim=self.enc_embed_dim,  # 与图像编码器输出通道一致
+        #     img_size=self.img_size,
+        #     patch_size=self.patch_size
+        # )
+        # self.pattern_embed = nn.Linear(self.enc_embed_dim, self.dec_embed_dim, bias=True)
+        self.pattern_encoder_embed = PatchEmbed_Mlp(
             img_size=self.img_size,
-            patch_size=self.patch_size
+            patch_size=self.patch_size,
+            in_chans=3,  # pattern是3通道
+            embed_dim=self.enc_embed_dim,  # 与图像嵌入维度一致（1024）
+            flatten=True  # 最终输出(B, 196, 1024)
+        )
+        self.pattern_decoder_embed = PatchEmbed_Mlp(
+            img_size=self.img_size,
+            patch_size=self.patch_size,
+            in_chans=3,  # pattern是3通道
+            embed_dim=self.dec_embed_dim,  # 与解码器嵌入维度一致（768）
+            flatten=True  # 最终输出(B, 196, 768)
         )
 
     @classmethod
@@ -152,15 +161,10 @@ class AsymmetricCroCo3DStereo (
 
     def load_state_dict(self, ckpt,** kw):
         new_ckpt = dict(ckpt)
-        # 处理原有的dec_blocks2权重
         if not any(k.startswith('dec_blocks2') for k in ckpt):
             for key, value in ckpt.items():
                 if key.startswith('dec_blocks'):
                     new_ckpt[key.replace('dec_blocks', 'dec_blocks2')] = value
-        # 忽略pattern_cnn相关权重（预训练权重无此部分）
-        for k in list(new_ckpt.keys()):
-            if k.startswith('pattern_cnn.'):  # 匹配子模块的参数名
-                del new_ckpt[k]
         return super().load_state_dict(new_ckpt, **kw)
 
     def set_freeze(self, freeze):
@@ -171,9 +175,6 @@ class AsymmetricCroCo3DStereo (
             'encoder': [self.mask_token, self.patch_embed, self.enc_blocks],
         }
         freeze_all_params(to_be_frozen[freeze])
-        # 3. 修正：冻结 pattern_cnn（子模块可直接传入）
-        if freeze in ['encoder', 'all']:
-            freeze_all_params([self.pattern_cnn])
 
     def _set_prediction_head(self, *args, **kwargs):
         """ No prediction head """
@@ -195,15 +196,31 @@ class AsymmetricCroCo3DStereo (
         self.head2 = transpose_to_landscape(self.downstream_head2, activate=landscape_only)
 
     def _encode_image(self, image, true_shape):
-        # embed the image into patches  (x has size B x Npatches x C)
         x, pos = self.patch_embed(image, true_shape=true_shape)
+        
+        if ENCODER:
+            B = x.shape[0]
+            pattern_path = "/data3/hanning/dust3r/tools/cropped_image.png"
+            pattern = cv2.imread(pattern_path)
+            device = image.device
+            pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0  # (3, H, W)
+            pattern = pattern.unsqueeze(0).to(device)
+            pattern = pattern.repeat(B, 1, 1, 1)  # (B, 3, H, W)
+            pattern_embed,pos_embed = self.pattern_encoder_embed(pattern)  # (B, N, enc_embed_dim)
+            # print("x,Patch特征形状:", x.shape) #(2,196,1024)
+            # print("pattern特征形状:", pattern_embed.shape) #(2,196,1024)
+            x = x + pattern_embed
 
-        # add positional embedding without cls token
         assert self.enc_pos_embed is None
 
+        total_blocks = len(self.enc_blocks)
+        half_blocks = int(total_blocks * 0.5)  # 前50%的层数
+
         # now apply the transformer encoder and normalization
-        for blk in self.enc_blocks:
+        for i,blk in enumerate(self.enc_blocks):
             x = blk(x, pos)
+            if ENCODER and i < half_blocks:
+                x = x + pattern_embed  # 注入pattern特征
 
         x = self.enc_norm(x)
         return x, pos, None
@@ -233,35 +250,35 @@ class AsymmetricCroCo3DStereo (
         else:
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1, img2, shape1, shape2)
 
-        # 第二步：计算 pattern 特征，并验证形状匹配
-        pattern_feat = self.pattern_cnn(pattern)  # (B, N, enc_embed_dim)
-        assert pattern_feat.shape == feat1.shape, \
-            f"Pattern特征形状{pattern_feat.shape}≠图像特征{feat1.shape}"
-
-        # 第三步：融合 pattern 特征（原逻辑保留）
-        feat1 += pattern_feat
-        feat2 += pattern_feat
-
-        # 补充 shape 定义（之前 shape1/shape2 在 feat1 之后定义，导致未定义错误）
         shape1 = view1.get('true_shape', torch.tensor(img1.shape[-2:])[None].repeat(B, 1))
         shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)
 
-    def _decoder(self, f1, pos1, f2, pos2):
-        final_output = [(f1, f2)]  # before projection
+    def _decoder(self, f1, pos1, f2, pos2, pattern):
+        final_output = [(f1, f2)] 
 
-        # project to decoder dim
         f1 = self.decoder_embed(f1)
-        f2 = self.decoder_embed(f2)
+        f2 = self.decoder_embed(f2) #shape=(B,196,768)
+        
+        if DECODER:
+            B = f1.shape[0]
+            pattern = pattern.repeat(B, 1, 1, 1)
+            pattern_feat,_ = self.pattern_decoder_embed(pattern)  # (B, N, dec_embed_dim)
+            
 
         final_output.append((f1, f2))
+        i = 1
         for blk1, blk2 in zip(self.dec_blocks, self.dec_blocks2):
             # img1 side
-            f1, _ = blk1(*final_output[-1][::+1], pos1, pos2)
+            f1, _ = blk1(*final_output[-1][::+1], pos1, pos2)      
             # img2 side
             f2, _ = blk2(*final_output[-1][::-1], pos2, pos1)
-            # store the result
+            if DECODER:
+                if i < 6:
+                    f1 += pattern_feat
+                    f2 += pattern_feat
+                i += 1
             final_output.append((f1, f2))
 
         # normalize last output
@@ -276,26 +293,21 @@ class AsymmetricCroCo3DStereo (
         return head(decout, img_shape)
 
     def forward(self, view1, view2):
-        # 加载 pattern 图像（原逻辑保留，确保移到正确设备）
         pattern_path = "/data3/hanning/dust3r/tools/cropped_image.png"
         pattern = cv2.imread(pattern_path)
         if pattern is None:
             raise FileNotFoundError(f"未找到pattern图像：{pattern_path}")
-        
-        # 转换为 PyTorch 张量并移到与 view1 相同的设备
+            
         device = view1['img'].device
         pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0  # (3, H, W)
         pattern = pattern.to(device)
         
-        # 扩展 batch 维度（匹配输入 batch 大小）
         B = view1['img'].shape[0]
         pattern = pattern.unsqueeze(0).repeat(B, 1, 1, 1)  # (B, 3, H, W)
 
-        # 编码 + 融合 pattern 特征
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2, pattern)
-        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
+        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2, pattern)
 
-        # 预测头（原逻辑保留）
         with torch.cuda.amp.autocast(enabled=False):
             res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
