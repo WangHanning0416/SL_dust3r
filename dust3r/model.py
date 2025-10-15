@@ -45,8 +45,6 @@ def load_model(model_path, device, verbose=True):
         print(s)
     return net.to(device)
 
-#TODO：缩小模型dim，不使用预训练参数
-#view：Img & pattern（备选 encoder换可学习的CNN）
 
 class PatternCNN(nn.Module):
     def __init__(self, in_channels, cnn_channels, out_dim, img_size, patch_size):
