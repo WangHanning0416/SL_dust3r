@@ -5,7 +5,7 @@ import numpy as np
 from tqdm import tqdm
 from SLSim import SLSim_batch
 
-pattern_path = "/data/hanning/SLAM3R1/data/patterns/snowleopard.png"
+pattern_path = "/data3/hanning/datasets/patterns/kinectsp.png"
 pattern = cv2.imread(pattern_path, cv2.IMREAD_UNCHANGED)
 pattern = torch.from_numpy(pattern)
 
@@ -32,8 +32,8 @@ def load_intrinsics(npz_path, device='cuda'):
     return torch.from_numpy(K).float().to(device)
 
 def process_scannet_folder_3gpu(root_dir, output_root, batch_size=12):
-    #subfolders = [f for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))][841:]
-    subfolders = ["e3c1da58dd"]
+    subfolders = [f for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))][227:]
+    #subfolders = ["e3c1da58dd"]
     print(f"find {len(subfolders)} scene folders")
     
     devices = ["cuda:0", "cuda:1"]
@@ -110,14 +110,14 @@ def process_scannet_folder_3gpu(root_dir, output_root, batch_size=12):
                     if out_np.dtype != np.uint8:
                         out_np = (out_np*255).astype(np.uint8) if out_np.max() <= 1 else out_np.astype(np.uint8)
                     cv2.imwrite(out_path, out_np)
-                break #注意这个里修改了以保证只需前几张图片
+                # 更新进度与索引，继续处理后续图片
                 pbar.update(B)
                 idx = end_idx
 
 
 if __name__ == "__main__":
     process_scannet_folder_3gpu(
-        "/data/yuzheng/data/scannetpp_v2/scannetpp_processed",
-        "/nvme/data/hanning/vis_crop",
+        "/data3/hanning/datasets/scannetpp_processed",
+        "/data3/hanning/datasets/scannetpp_SLpattern",
         batch_size=12
     )

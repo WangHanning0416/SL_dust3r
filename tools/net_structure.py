@@ -11,7 +11,7 @@ import torch
 def main():
     parser = argparse.ArgumentParser(__doc__)
     # Provide a sensible default so the script can be run without args.
-    default_ckpt = '/data3/hanning/dust3r/checkpoints/dust3r_SL_224_pattern_encoder6/checkpoint-best.pth'
+    default_ckpt = '/data3/hanning/dust3r1/checkpoints/dust3r_SL_224/checkpoint-best.pth'
     parser.add_argument('--ckpt', default=default_ckpt, help=f'path to checkpoint .pth file (default: {default_ckpt})')
     args = parser.parse_args()
 

@@ -97,7 +97,7 @@ def SLSim_batch(rgb, depth, pattern, K_cam, K_proj, cam2proj):
     projected = apply_depth_blur_batch(projected, proj_points[...,2])
     rgb_f = rgb.float()
     proj_f = projected.float()
-    alpha = 0.2
+    alpha = 0.4
     gray = proj_f.mean(dim=-1, keepdim=True)/255.0
     w1 = gray + (1-gray)*(1-alpha)
     w2 = (1-gray)*alpha
