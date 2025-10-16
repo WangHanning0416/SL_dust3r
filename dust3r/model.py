@@ -12,6 +12,7 @@ import huggingface_hub
 from torch import nn
 import torch.nn.functional as F
 import cv2
+import numpy as np
 
 from .utils.misc import fill_default_args, freeze_all_params, is_symmetrized, interleave, transpose_to_landscape
 from .heads import head_factory
@@ -124,6 +125,7 @@ class AsymmetricCroCo3DStereo (
         #     patch_size=self.patch_size
         # )
         # self.pattern_embed = nn.Linear(self.enc_embed_dim, self.dec_embed_dim, bias=True)
+        self.attn_save_dir = "/data3/hanning/dust3r/cross_attn_npy"
         self.pattern_encoder_embed = PatchEmbed_Mlp(
             img_size=self.img_size,
             patch_size=self.patch_size,
@@ -264,16 +266,27 @@ class AsymmetricCroCo3DStereo (
 
         final_output.append((f1, f2))
         i = 1
-        for blk1, blk2 in zip(self.dec_blocks, self.dec_blocks2):
+        for blk_idx, (blk1, blk2) in enumerate(zip(self.dec_blocks, self.dec_blocks2)):
             # img1 side
-            f1, _ = blk1(*final_output[-1][::+1], pos1, pos2)      
+            f1, _ , attn_map1 = blk1(*final_output[-1][::+1], pos1, pos2)   
             # img2 side
-            f2, _ = blk2(*final_output[-1][::-1], pos2, pos1)
-            if DECODER:
-                if i < 6:
-                    f1 += pattern_feat
-                    f2 += pattern_feat
-                i += 1
+            f2, _ , attn_map2 = blk2(*final_output[-1][::-1], pos2, pos1)
+            
+            os.makedirs(os.path.join(self.attn_save_dir, f"layer_{blk_idx}"), exist_ok=True)
+            save_path_f1 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img1_to_img2_attn.npy")
+            save_path_f2 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img2_to_img1_attn.npy")
+            
+
+            attn_map1 = attn_map1.detach().cpu().numpy()
+            attn_map2 = attn_map2.detach().cpu().numpy()
+
+            np.save(save_path_f1, attn_map1)
+            np.save(save_path_f2, attn_map2)
+            # if DECODER:
+            #     if i < 6:
+            #         f1 += pattern_feat
+            #         f2 += pattern_feat
+            #     i += 1
             final_output.append((f1, f2))
 
         # normalize last output
