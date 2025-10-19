@@ -13,7 +13,7 @@ from dust3r.datasets.utils.transforms import ImgNorm  # 导入图像归一化处
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r1/checkpoints/dust3r_rgb_224/checkpoint-best.pth",
+    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_decoder/checkpoint-best.pth",
     "resolution": 224,  # 图像分辨率
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
@@ -291,8 +291,8 @@ def main():
         image_pairs = []
         idx = 0
         while True:
-            img1_path = f"/data3/hanning/datasets/Replica/{scene_name}/results/frame{idx:06d}.jpg"
-            img2_path = f"/data3/hanning/datasets/Replica/{scene_name}/results/frame{idx+1:06d}.jpg"
+            img1_path = f"/data3/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx:06d}.jpg"
+            img2_path = f"/data3/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx+1:06d}.jpg"
             depth1_path = f"/data3/hanning/datasets/Replica/{scene_name}/results/depth{idx:06d}.png"
             depth2_path = f"/data3/hanning/datasets/Replica/{scene_name}/results/depth{idx+1:06d}.png"
             

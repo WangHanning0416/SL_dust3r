@@ -169,9 +169,9 @@ def process_replica_folder(root_dir, output_root, pattern, K_cam, K_proj, cam2pr
 
 # ---------------------- 3. 主函数入口 ----------------------
 if __name__ == "__main__":
-    input_root = "/data/hanning/SLAM3R/data/Replica"
-    output_root = "/nvme/data/hanning/datasets/replica_SL"
-    pattern_path = "/data/hanning/SLAM3R/data/patterns/alacarte.png"
+    input_root = "/data3/hanning/datasets/Replica"
+    output_root = "/data3/hanning/datasets/Replica_kinectic"
+    pattern_path = "/data3/hanning/datasets/patterns/kinectsp.png"
 
     # 加载结构光图案
     pattern = cv2.imread(pattern_path, cv2.IMREAD_UNCHANGED)

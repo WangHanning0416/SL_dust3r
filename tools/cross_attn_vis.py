@@ -1,6 +1,6 @@
 import os
-import argparse
 import numpy as np
+import torch
 from pathlib import Path
 from PIL import Image
 import megfile
@@ -11,64 +11,148 @@ from bokeh.models import (ColumnDataSource, CustomJS, LinearColorMapper, HoverTo
                           Select, Div)
 from bokeh.palettes import Viridis256
 
-try:
-    from tools.utils import load_image_as_rgba, softmax, flip_attn_map
-except:
-    from utils import load_image_as_rgba, softmax, flip_attn_map
 
-# --- 1. 参数解析与文件扫描 ---
-parser = argparse.ArgumentParser(description="Attention Map 浏览器")
-parser.add_argument("-d", "--directory", type=str, required=True, help="包含.npy数据文件的目录路径")
-parser.add_argument("-t", "--temperature", type=float, default=0.02)
-args = parser.parse_args()
+# --------------------------
+# 配置参数（请确保路径正确）
+# --------------------------
+NPY_FILE_PATH = "/data3/hanning/dust3r/cross_attn_npy/layer_1/img1_to_img2_attn.npy"
+SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/frame000001.png"
+TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/frame000000.png"
+TEMPERATURE = 0.02
+PATCH_SIZE = 14  # 14x14=196（根据npy形状调整）
 
-data_dir = args.directory
-npy_files = sorted([os.path.basename(p) for p in megfile.smart_glob(os.path.join(data_dir, '**', '*.npy'), recursive=True)])
 
-if not npy_files:
-    error_div = Div(text=f"<h3>错误：在目录 '{data_dir}' 中没有找到任何 .npy 文件。</h3>")
+# --------------------------
+# 辅助函数（带详细日志，不修改图片形状）
+# --------------------------
+def debug_print(message):
+    """调试打印函数，同时输出到终端和页面信息面板"""
+    print(f"[DEBUG] {message}")
+    info_div.text += f"<br>[DEBUG] {message}"
+
+
+def merge_attn_map(attn_maps, suppress_1st_attn=False, attn_layers_adopted: list[int] = None):
+    """合并多层多头注意力图（带日志）"""
+    debug_print(f"进入merge_attn_map，输入长度：{len(attn_maps)}")
+    try:
+        attn_maps = attn_maps if attn_layers_adopted is None else [attn_maps[idx] for idx in attn_layers_adopted]
+        debug_print(f"筛选后层数：{len(attn_maps)}，单一层形状：{attn_maps[0].shape}")
+        
+        attn_maps = torch.stack(attn_maps, dim=1)
+        debug_print(f"堆叠后形状：{attn_maps.shape}")
+        
+        attn_maps = torch.mean(attn_maps, dim=(1, 2))
+        debug_print(f"合并层和头后形状：{attn_maps.shape}")
+        
+        if suppress_1st_attn:
+            attn_maps[:, :, 0] = attn_maps.min()
+            debug_print("已抑制第一个token的注意力")
+        return attn_maps
+    except Exception as e:
+        debug_print(f"merge_attn_map错误：{str(e)}")
+        raise
+
+def load_image_as_rgba(img_path):
+    """
+    加载图片并转换为Bokeh兼容的RGBA格式（已修正数据溢出和坐标系问题）
+    """
+    debug_print(f"开始加载图片：{img_path}")
+    try:
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"图片文件不存在：{img_path}")
+        
+        with Image.open(img_path) as img:
+            debug_print(f"PIL.Image 初始模式: {img.mode}，尺寸: {img.size}")
+            img = img.convert('RGBA')
+            
+            img_np = np.array(img, dtype=np.uint8)
+            
+            # --- 关键修正 1：垂直翻转以匹配Bokeh的左下角原点坐标系 ---
+            img_np = np.flipud(img_np)
+            debug_print("已执行 np.flipud() 垂直翻转")
+            # --------------------------------------------------------
+
+            # --- 关键修正 2：先将类型转为 uint32 再进行位运算，防止溢出 ---
+            # 分别提取 R, G, B, A 四个通道，并预先转换类型
+            r = img_np[:, :, 0].astype(np.uint32)
+            g = img_np[:, :, 1].astype(np.uint32)
+            b = img_np[:, :, 2].astype(np.uint32)
+            a = img_np[:, :, 3].astype(np.uint32)
+            
+            # 在安全的 uint32 类型下进行位运算
+            rgba_array = (r << 24 | g << 16 | b << 8 | a)
+            # -------------------------------------------------------------
+            
+            debug_print(f"最终 uint32 数组形状: {rgba_array.shape}, 数据类型: {rgba_array.dtype}")
+            # 添加这个检查，它的最大值一定不能为0！
+            debug_print(f"uint32 数组 最小值: {np.min(rgba_array)}, 最大值: {np.max(rgba_array)}")
+            
+            return rgba_array, img.size[0], img.size[1]
+            
+    except Exception as e:
+        debug_print(f"图片加载/转换错误: {str(e)}")
+        raise
+
+def softmax(x):
+    """数值稳定的softmax"""
+    try:
+        e_x = np.exp(x - np.max(x))
+        return e_x / e_x.sum(axis=0)
+    except Exception as e:
+        debug_print(f"softmax计算错误：{str(e)}")
+        raise
+
+def flip_attn_map(attn_map):
+    """翻转注意力图（带日志）"""
+    debug_print(f"翻转前注意力图形状：{attn_map.shape}")
+    flipped = np.flipud(attn_map)
+    debug_print(f"翻转后注意力图形状：{flipped.shape}")
+    return flipped
+
+if not os.path.exists(NPY_FILE_PATH):
+    error_div = Div(text=f"<h3>错误：npy文件不存在！</h3><p>{NPY_FILE_PATH}</p>")
     curdoc().add_root(error_div)
 else:
-    # --- global ---
-    similarity_array = None
-    temp = args.temperature
+    npy_files = [os.path.basename(NPY_FILE_PATH)]
+    data_dir = os.path.dirname(NPY_FILE_PATH)
 
-    # --- 2. create Bokeh components and data sources ---
-    file_selector = Select(title="select Attention Map file:", value=npy_files[0], options=npy_files)
-    info_div = Div(text="infomation panel")
+    # 全局变量
+    similarity_array = None
+    temp = TEMPERATURE
+    src_width, src_height = 0, 0  # 源图片尺寸
+    trg_width, trg_height = 0, 0  # 目标图片尺寸
+
+    # 创建UI组件
+    file_selector = Select(title="注意力图文件:", value=npy_files[0], options=npy_files)
+    info_div = Div(text="<h3>调试信息面板</h3><p>启动中...</p>")
     trg_source = ColumnDataSource(data={'image': []})
     src_source = ColumnDataSource(data={'image': []})
     heatmap_source = ColumnDataSource(data={'x': [], 'y': [], 'similarity': []})
     max_point_source = ColumnDataSource(data={'x': [], 'y': []})
     trg_hover_source = ColumnDataSource(data={'x': [], 'y': []})
     signal_source = ColumnDataSource(data={'x': [], 'y': []})
-
-    # create data source for the red point on the source
     trg_selected_dot_source = ColumnDataSource(data={'x': [], 'y': []})
 
-    # --- 3. create chart ---
+    # 创建图表（不预设尺寸，后续根据图片原始尺寸设置）
     hover_tool = HoverTool(tooltips=None, mode='mouse')
-    # NOTE: initial ranges are small; we will set them correctly when loading an image
-    p_trg = figure(x_range=(0, 1), y_range=(0, 1), tools=[hover_tool, 'tap', 'pan', 'wheel_zoom', 'reset'],
-                   title="target image", match_aspect=True)
-    p_src = figure(x_range=(0, 1), y_range=(0, 1), tools="pan,wheel_zoom,reset,help",
-                   title="source image", match_aspect=True)
+    p_trg = figure(tools=[hover_tool, 'tap', 'pan', 'wheel_zoom', 'reset'],
+                   title="目标图片", match_aspect=True)
+    p_src = figure(tools="pan,wheel_zoom,reset,help",
+                   title="源图片", match_aspect=True)
 
-    # Make sizing_mode fixed by default so explicit pixel sizes take effect.
-    p_trg.sizing_mode = 'fixed'
-    p_src.sizing_mode = 'fixed'
-
+    # 渲染图片（初始设置为临时尺寸）
     trg_image_renderer = p_trg.image_rgba(image='image', x=0, y=0, dw=1, dh=1, source=trg_source)
     src_image_renderer = p_src.image_rgba(image='image', x=0, y=0, dw=1, dh=1, source=src_source)
 
+    # 目标图片交互
     p_trg.grid.grid_line_color = None
     p_trg.rect(x='x', y='y', width=1, height=1, source=trg_hover_source, fill_alpha=0,
                line_color=None, hover_fill_alpha=0.3, hover_fill_color='white')
-    p_trg.js_on_event('tap', CustomJS(args={'source': signal_source}, code="source.data = {x: [cb_obj.x], y: [cb_obj.y]};"))
-
-    # add a red point to the source, indicating the current selected source patch
+    p_trg.js_on_event('tap', CustomJS(args={'source': signal_source}, 
+                                     code="source.data = {x: [cb_obj.x], y: [cb_obj.y]};"))
     p_trg.circle(x='x', y='y', size=10, color='red', source=trg_selected_dot_source)
     
+    # 源图片热力图
     p_src.grid.grid_line_color = None
     color_mapper = LinearColorMapper(palette=Viridis256, low=0, high=1)
     heatmap_renderer = p_src.rect(x='x', y='y', width=1, height=1,
@@ -76,118 +160,160 @@ else:
                                   fill_alpha=0.5, line_color=None, source=heatmap_source)
     p_src.circle(x='x', y='y', size=10, color='red', source=max_point_source)
 
-    # --- 4. 核心回调函数 ---
+
+    # --------------------------
+    # 核心回调函数（保持图片原始形状）
+    # --------------------------
     def update_visualization(filepath):
-        global similarity_array
+        global similarity_array, src_width, src_height, trg_width, trg_height
         try:
+            info_div.text = "<h3>调试信息面板</h3><p>开始加载数据...</p>"
             name = os.path.basename(filepath)
-            info_div.text = f"<b>Loading:</b> {os.path.basename(filepath)}"
+            debug_print(f"处理文件：{name}，路径：{filepath}")
+
+            # 1. 加载npy文件
+            if not os.path.exists(filepath):
+                raise FileNotFoundError(f"npy文件不存在：{filepath}")
+            debug_print("npy文件存在，开始加载...")
             with megfile.smart_open(filepath, 'rb') as f:
-                data = np.load(f, allow_pickle=True).tolist()
-            src_img_path, trg_img_path = data["source_path"], data["target_path"]
-            similarity_array = data["attn_map"]
+                attn_np = np.load(f)
+            debug_print(f"npy文件加载成功，原始形状：{attn_np.shape}")
+
+            # 2. 处理注意力图
+            debug_print("开始处理注意力图...")
+            attn_tensor = torch.from_numpy(attn_np)
+            debug_print(f"转为张量后形状：{attn_tensor.shape}")
+            attn_maps_list = [attn_tensor]
+            merged_attn = merge_attn_map(attn_maps_list, suppress_1st_attn=False)
+            debug_print(f"合并后注意力图形状：{merged_attn.shape}")
+
+            # 3. 转换为4维空间形状
+            merged_attn_np = merged_attn.cpu().numpy()
+            debug_print(f"转为NumPy后形状：{merged_attn_np.shape}")
+            expected_shape = (1, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE)
+            if merged_attn_np.size != np.prod(expected_shape):
+                raise ValueError(f"reshape失败：原始大小{merged_attn_np.size} != 预期大小{np.prod(expected_shape)}")
+            similarity_array = merged_attn_np.reshape(expected_shape)[0]
             similarity_array = flip_attn_map(similarity_array)
-            h = data['h'] if 'h' in data else None
-            w = data['w'] if 'w' in data else None
-            src_img = load_image_as_rgba(src_img_path, h, w)
-            trg_img = load_image_as_rgba(trg_img_path, h, w)
+            debug_print(f"最终注意力图形状：{similarity_array.shape}")
 
-            # src_img / trg_img are expected as H x W uint32-like arrays (image_rgba expects that shape)
-            H, W = src_img.shape
-            h, w = similarity_array.shape[0:2]
-            patch_size_h, patch_size_w = H / h, W / w
+            # 4. 加载图片（关键：不修改尺寸！）
+            src_img, src_width, src_height = load_image_as_rgba(SOURCE_IMG_PATH)  # 获取宽度和高度
+            trg_img, trg_width, trg_height = load_image_as_rgba(TARGET_IMG_PATH)
+            debug_print(f"源图片原始尺寸：宽={src_width}，高={src_height}")
+            debug_print(f"目标图片原始尺寸：宽={trg_width}，高={trg_height}")
 
-            # set image data (note you named variables swapped intentionally as original code)
+            # 5. 更新图片数据源（使用原始尺寸）
             trg_source.data = {'image': [trg_img]}
             src_source.data = {'image': [src_img]}
+            debug_print("图片数据已更新到数据源（原始尺寸）")
 
-            # --- IMPORTANT: keep data ranges in pixel coordinates (0..W, 0..H) ---
-            p_trg.x_range.start, p_trg.x_range.end = 0, W
-            p_trg.y_range.start, p_trg.y_range.end = 0, H
-            p_src.x_range.start, p_src.x_range.end = 0, W
-            p_src.y_range.start, p_src.y_range.end = 0, H
+            # 6. 设置图表坐标范围为图片原始像素范围（0~宽，0~高）
+            p_trg.x_range.start, p_trg.x_range.end = 0, trg_width
+            p_trg.y_range.start, p_trg.y_range.end = 0, trg_height
+            p_src.x_range.start, p_src.x_range.end = 0, src_width
+            p_src.y_range.start, p_src.y_range.end = 0, src_height
+            debug_print(f"目标图坐标范围：x=0~{trg_width}，y=0~{trg_height}")
+            debug_print(f"源图坐标范围：x=0~{src_width}，y=0~{src_height}")
 
-            # update image glyph data-size (data units)
-            trg_image_renderer.glyph.dw, trg_image_renderer.glyph.dh = W, H
-            src_image_renderer.glyph.dw, src_image_renderer.glyph.dh = W, H
+            # 7. 设置图片显示尺寸为原始尺寸（dw=宽，dh=高）
+            trg_image_renderer.glyph.dw, trg_image_renderer.glyph.dh = trg_width, trg_height
+            src_image_renderer.glyph.dw, src_image_renderer.glyph.dh = src_width, src_height
+            debug_print(f"目标图显示尺寸：dw={trg_width}，dh={trg_height}")
+            debug_print(f"源图显示尺寸：dw={src_width}，dh={src_height}")
 
-            # --- Ensure the figure pixel size matches image aspect ratio ---
-            # choose a sane maximum display side so browser won't be overwhelmed
-            MAX_DISPLAY_SIDE = 600
-            scale = min(1.0, MAX_DISPLAY_SIDE / max(W, H))
-            scale = MAX_DISPLAY_SIDE / max(W, H)
-            display_w = max(200, int(round(W * scale)))   # at least some minimum to keep UI usable
-            display_h = max(200, int(round(H * scale)))
+            # 8. 图表大小适配图片（最大不超过800px，避免过大）
+            MAX_SIZE = 800
+            trg_scale = min(MAX_SIZE / trg_width, MAX_SIZE / trg_height, 1.0)
+            src_scale = min(MAX_SIZE / src_width, MAX_SIZE / src_height, 1.0)
+            trg_display_w, trg_display_h = int(trg_width * trg_scale), int(trg_height * trg_scale)
+            src_display_w, src_display_h = int(src_width * src_scale), int(src_height * src_scale)
+            p_trg.width, p_trg.height = trg_display_w, trg_display_h
+            p_src.width, p_src.height = src_display_w, src_display_h
+            debug_print(f"目标图表显示尺寸：{trg_display_w}x{trg_display_h}")
+            debug_print(f"源图表显示尺寸：{src_display_w}x{src_display_h}")
 
-            # try to set plot_width/plot_height; fallback to width/height if needed
-            # also force sizing_mode='fixed' so layout doesn't override the pixel size
-            for p in (p_trg, p_src):
-                p.sizing_mode = 'fixed'
-            if hasattr(p_trg, 'plot_width'):
-                p_trg.plot_width, p_trg.plot_height = display_w, display_h
-            else:
-                p_trg.width, p_trg.height = display_w, display_h
+            # 9. 更新标题
+            p_trg.title.text = f"目标图片：{Path(TARGET_IMG_PATH).name}（{trg_width}x{trg_height}）"
+            p_src.title.text = f"源图片：{Path(SOURCE_IMG_PATH).name}（{src_width}x{src_height}）"
 
-            if hasattr(p_src, 'plot_width'):
-                p_src.plot_width, p_src.plot_height = display_w, display_h
-            else:
-                p_src.width, p_src.height = display_w, display_h
+            # 10. 计算patch尺寸（基于原始图片尺寸）
+            h_attn, w_attn = similarity_array.shape[0:2]
+            patch_size_h, patch_size_w = trg_height / h_attn, trg_width / w_attn  # 每个patch的像素大小
+            debug_print(f"patch尺寸：高={patch_size_h:.2f}px，宽={patch_size_w:.2f}px")
 
-            # update titles
-            p_trg.title.text = f"target image: {Path(trg_img_path).name}"
-            p_src.title.text = f"source image: {Path(src_img_path).name}"
-
-            # update heatmap patch centers & sizes
-            patch_x = np.tile(np.arange(w) * patch_size_w + patch_size_w / 2, h)
-            patch_y = np.repeat(np.arange(h) * patch_size_h + patch_size_h / 2, w)
+            # 11. 初始化热力图网格（每个patch的中心坐标）
+            patch_x = np.tile(np.arange(w_attn) * patch_size_w + patch_size_w/2, h_attn)
+            patch_y = np.repeat(np.arange(h_attn) * patch_size_h + patch_size_h/2, w_attn)
             trg_hover_source.data = {'x': patch_x, 'y': patch_y}
             heatmap_source.data['x'], heatmap_source.data['y'] = patch_x, patch_y
             heatmap_renderer.glyph.width, heatmap_renderer.glyph.height = patch_size_w, patch_size_h
+            debug_print(f"热力图网格初始化完成，patch数量：{len(patch_x)}")
 
-            # initialize heatmap selection
-            update_heatmap(None, None, {'x': [0], 'y': [0]})
-            info_div.text = f"<b>Selected file:</b> {name}<br><b>resolution:</b> {W}x{H}"
+            # 12. 初始化热力图
+            update_heatmap(None, None, {'x': [trg_width/2], 'y': [trg_height/2]})  # 从图片中心开始
+            debug_print("初始化完成，可视化准备就绪")
+
         except Exception as e:
-            info_div.text = f"<b>Error when loading .npy file:</b> {name}<br><pre>{e}</pre>"
+            debug_print(f"加载失败：{str(e)}")
+            raise
+
 
     def update_heatmap(attr, old, new):
         global temp
-        if not new.get('x') or similarity_array is None: return
-        H, W = p_trg.y_range.end, p_trg.x_range.end
-        h, w = similarity_array.shape[0:2]
-        patch_size_h, patch_size_w = H / h, W / w
-        x_click, y_click = new['x'][0], new['y'][0]
-        i = max(0, min(h - 1, int(y_click / patch_size_h)))
-        j = max(0, min(w - 1, int(x_click / patch_size_w)))
-        
-        # patch's center coordinates
-        selected_x = j * patch_size_w + patch_size_w / 2
-        selected_y = i * patch_size_h + patch_size_h / 2
-        # update the red point on the source
-        trg_selected_dot_source.data = {'x': [selected_x], 'y': [selected_y]}
+        try:
+            if not new.get('x') or similarity_array is None:
+                debug_print("update_heatmap：无输入或注意力图未加载")
+                return
+            
+            # 计算点击位置对应的patch索引
+            H, W = trg_height, trg_width
+            h_attn, w_attn = similarity_array.shape[0:2]
+            patch_size_h, patch_size_w = H / h_attn, W / w_attn
+            x_click, y_click = new['x'][0], new['y'][0]
+            i = max(0, min(h_attn - 1, int(y_click / patch_size_h)))
+            j = max(0, min(w_attn - 1, int(x_click / patch_size_w)))
+            debug_print(f"点击位置：({x_click:.1f}, {y_click:.1f})，对应patch索引：i={i}, j={j}")
 
-        # update heatmap and the red point on the target image
-        new_similarity = similarity_array[i, j, :, :].flatten()
-        if temp > 0:
-            new_similarity = softmax(new_similarity / temp)
-        else:
-            new_similarity = (new_similarity - new_similarity.min()) / (new_similarity.max() - new_similarity.min())
-        heatmap_source.data['similarity'] = new_similarity
-        max_idx = int(np.argmax(new_similarity))
-        patch_x, patch_y = heatmap_source.data['x'], heatmap_source.data['y']
-        max_point_source.data = {'x': [patch_x[max_idx]], 'y': [patch_y[max_idx]]}
-    
+            # 更新目标图片选中标记
+            selected_x = j * patch_size_w + patch_size_w/2
+            selected_y = i * patch_size_h + patch_size_h/2
+            trg_selected_dot_source.data = {'x': [selected_x], 'y': [selected_y]}
+
+            # 提取并归一化注意力值
+            new_similarity = similarity_array[i, j, :, :].flatten()
+            debug_print(f"提取的注意力值数量：{len(new_similarity)}")
+            if temp > 0:
+                new_similarity = softmax(new_similarity / temp)
+            else:
+                new_similarity = (new_similarity - new_similarity.min()) / (new_similarity.max() - new_similarity.min() + 1e-8)
+            heatmap_source.data['similarity'] = new_similarity
+
+            # 标记最大注意力位置
+            max_idx = np.argmax(new_similarity)
+            patch_x, patch_y = heatmap_source.data['x'], heatmap_source.data['y']
+            max_point_source.data = {'x': [patch_x[max_idx]], 'y': [patch_y[max_idx]]}
+
+        except Exception as e:
+            debug_print(f"update_heatmap错误：{str(e)}")
+
+
     def on_file_select(attr, old, new):
+        debug_print(f"切换文件：{new}")
         update_visualization(os.path.join(data_dir, new))
 
-    # --- 5. bind callbacks. layouts ---
+
+    # --------------------------
+    # 绑定回调和布局
+    # --------------------------
     file_selector.on_change('value', on_file_select)
     signal_source.on_change('data', update_heatmap)
-    controls = column(file_selector, info_div, width=300)
+    controls = column(file_selector, info_div, width=400)
     plots = row(p_trg, p_src)
     main_layout = row(controls, plots)
     curdoc().add_root(main_layout)
-    curdoc().title = "Attention Map Browser"
+    curdoc().title = "注意力图可视化（保持原始图片形状）"
     
-    # --- 6. initialize. ---
-    update_visualization(os.path.join(data_dir, npy_files[0]))
+    # 初始化显示
+    debug_print("启动初始化...")
+    update_visualization(NPY_FILE_PATH)
