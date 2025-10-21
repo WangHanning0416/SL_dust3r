@@ -13,7 +13,7 @@ from dust3r.datasets.utils.transforms import ImgNorm  # 导入图像归一化处
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_decoder/checkpoint-best.pth",
+    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic/checkpoint-best.pth",
     "resolution": 224,  # 图像分辨率
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
@@ -70,7 +70,6 @@ def _crop_resize_if_necessary(image, depthmap, intrinsics, resolution, rng=None)
     """与数据集类中相同的裁剪和缩放处理"""
     if not isinstance(image, PIL.Image.Image):
         image = PIL.Image.fromarray(image)
-
     # 基于主点裁剪
     W, H = image.size
     cx, cy = intrinsics[:2, 2].round().astype(int)
@@ -81,7 +80,6 @@ def _crop_resize_if_necessary(image, depthmap, intrinsics, resolution, rng=None)
     crop_bbox = (l, t, r, b)
     image, depthmap, intrinsics = crop_image_depthmap(image, depthmap, intrinsics, crop_bbox)
 
-    # 处理分辨率（确保横屏）
     W, H = image.size
     assert resolution[0] >= resolution[1]
     if H > 1.1 * W:
@@ -90,11 +88,9 @@ def _crop_resize_if_necessary(image, depthmap, intrinsics, resolution, rng=None)
         if rng.integers(2):
             resolution = resolution[::-1]
 
-    # 高质量下采样
     target_resolution = np.array(resolution)
     image, depthmap, intrinsics = rescale_image_depthmap(image, depthmap, intrinsics, target_resolution)
 
-    # 最终裁剪
     intrinsics2 = camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
     crop_bbox = bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
     image, depthmap, intrinsics2 = crop_image_depthmap(image, depthmap, intrinsics, crop_bbox)
@@ -111,19 +107,15 @@ def process_view(img_path, depth_path, intrinsics, resolution, rng, idx, view_id
     max_val = float(np.nanmax(depthmap)) if depthmap.size > 0 else 0.0
     depthmap = depthmap / 6553.5
 
-    # 非有限值置为0
     depthmap[~np.isfinite(depthmap)] = 0.0
 
-    # 裁剪和缩放
     img_pil, depthmap, intrinsics = _crop_resize_if_necessary(
         img, depthmap, intrinsics, resolution, rng=rng)
 
-    # 构建基础视图字典
     view = {
         'img': img_pil,
         'depthmap': depthmap.astype(np.float32),
         'camera_intrinsics': intrinsics.astype(np.float32),
-        # 对于没有位姿的情况，使用单位矩阵
         'camera_pose': np.eye(4, dtype=np.float32),
         'dataset': 'custom',
         'label': os.path.basename(img_path),
@@ -173,7 +165,6 @@ def save_pts_to_ply(pts, colors, save_path):
 
 def process_image_pair(model, image1_path, image2_path, depth1_path, depth2_path, 
                        pair_idx, ply_dir, intrinsics, resolution, rng):
-    """处理单个图像对并返回评估所需数据（不单独保存npy文件）"""
     try:
         # 处理两个视图
         view1 = process_view(image1_path, depth1_path, intrinsics, resolution, rng, pair_idx, 0)
@@ -314,7 +305,6 @@ def main():
             image_pairs=image_pairs,
             intrinsics=intrinsics
         )
-
         print(f"\n===== 场景 {scene_name} 处理完成 =====")
 
 if __name__ == "__main__":

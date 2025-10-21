@@ -18,7 +18,7 @@ from bokeh.palettes import Viridis256
 # 配置参数（请确保路径正确）
 # --------------------------
 NPY_DIR = "/data3/hanning/dust3r/cross_attn_npy/"  # 改为目录路径
-SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/frame000001.png"
+SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
 TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/frame000000.png"
 TEMPERATURE = 0.02
 PATCH_SIZE = 14  # 14x14=196（根据npy形状调整）
@@ -26,10 +26,8 @@ PATCH_SIZE = 14  # 14x14=196（根据npy形状调整）
 info_div = Div(text="<h3>调试信息面板</h3><p>启动中...</p>")
 
 def debug_print(message):
-    """调试打印函数，同时输出到终端和页面信息面板"""
     print(f"[DEBUG] {message}")
     info_div.text += f"<br>[DEBUG] {message}"
-
 
 def merge_attn_map(attn_maps, suppress_1st_attn=False, attn_layers_adopted: list[int] = None):
     """合并多层多头注意力图（带日志）"""
@@ -53,9 +51,6 @@ def merge_attn_map(attn_maps, suppress_1st_attn=False, attn_layers_adopted: list
         raise
 
 def load_image_as_rgba(img_path):
-    """
-    加载图片并转换为Bokeh兼容的RGBA格式（已修正数据溢出和坐标系问题）
-    """
     debug_print(f"开始加载图片：{img_path}")
     try:
         if not os.path.exists(img_path):
@@ -133,7 +128,6 @@ else:
         src_width, src_height = 0, 0  # 源图片尺寸
         trg_width, trg_height = 0, 0  # 目标图片尺寸
 
-        # 创建UI组件
         file_selector = Select(
             title="注意力图文件 (layer_0到layer_11):",
             value=npy_files[0],

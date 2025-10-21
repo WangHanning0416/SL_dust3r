@@ -108,6 +108,10 @@ def process_view(img_path, depth_path, intrinsics, resolution, rng, idx, view_id
     depthmap = imread_cv2(depth_path, cv2.IMREAD_UNCHANGED)
     
     depthmap = depthmap.astype(np.float32)
+    print(f"读取深度图形状：{depthmap.shape}, 数据类型：{depthmap.dtype}")
+    if depthmap.shape == (720, 1280, 3):
+        depthmap = cv2.cvtColor(depthmap, cv2.COLOR_RGB2GRAY)
+        print(f"深度图有3个通道，已转换为单通道，形状：{depthmap.shape}")
     max_val = float(np.nanmax(depthmap)) if depthmap.size > 0 else 0.0
     depthmap = depthmap / 6553.5
 
@@ -199,9 +203,13 @@ def main():
         torch.cuda.manual_seed(42)
     
     img1_path = f"/data3/hanning/datasets/Replica/office0/results/frame000000.jpg"
-    img2_path = f"/data3/hanning/datasets/Replica/office0/results/frame000001.jpg"
+    img2_path = f"/data3/hanning/datasets/patterns/kinectsp.png"
     depth1_path = f"/data3/hanning/datasets/Replica/office0/results/depth000000.png"
-    depth2_path = f"/data3/hanning/datasets/Replica/office0/results/depth000001.png"
+    depth2_path = f"/data3/hanning/datasets/patterns/kinectsp.png"
+    depth1 = cv2.imread(depth1_path, cv2.IMREAD_UNCHANGED)
+    print(depth1.shape)
+    depth2 = cv2.imread(depth2_path, cv2.IMREAD_UNCHANGED)
+    print(depth2.shape)
             
     image_pairs.append((img1_path, img2_path, depth1_path, depth2_path))
 
