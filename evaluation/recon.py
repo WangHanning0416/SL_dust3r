@@ -13,11 +13,11 @@ from dust3r.datasets.utils.transforms import ImgNorm  # 导入图像归一化处
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic/checkpoint-best.pth",
-    "resolution": 224,  # 图像分辨率
+    "model_weight_path": "/data3/hanning/dust3r1/checkpoints/dust3r_rgb_224/checkpoint-best.pth",
+    "resolution": 224,  
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
-    "base_result_dir": "/data3/hanning/dust3r/result/",  # 基础结果目录
+    "base_result_dir": "/data3/hanning/dust3r/result_rgb/",  # 基础结果目录
 }
 
 def init_scene_dir(scene_name):

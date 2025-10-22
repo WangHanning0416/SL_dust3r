@@ -1,8 +1,41 @@
-方法          office0        office1        office2         office3         office4        room0           room1          room2            注释
-dust3r_1    6.675/8.399    6.133/7.606    8.742/10.016    9.656/9.697     5.942/8.327    8.251/10.877    6.307/7.541    10.191/10.568    kinectsp
-dust3r_2    7.034/8.036    5.921/7.020    8.808/9.729     9.590/10.493    5.863/7.984    9.294/10.592    6.753/8.173    9.699/10.094     alacarte
-dust3r_3    5.506/4.011    6.089/5.118    6.119/4.708     7.725/4.821     6.482/4.382    5.622/3.941     4.427/3.470    6.620/3.607      rgb
-dust3r_6    6.848/8.470    6.101/7.740    8.369/9.723     9.657/10.373    6.066/8.478    8.272/11.005    5.895/7.313    10.499/11.436    kinectsp_encoder六层注入pattern
-dust3r_7    6.460/8.302    5.787/7.276    8.526/10.199    9.553/10.128    6.211/8.552    8.329/10.966    6.317/7.962    10.133/10.942    kinectsp_decoder六层注入pattern
-dust3r_8    6.499/8.460    6.208/7.807    8.912/10.240    9.851/10.724    5.890/8.233    8.182/10.791    6.328/7.723    10.059/11.022    kinectsp_只在decoder第一层注入pattern
-dust3r_9    6.696/8.862    6.011/7.820    9.053/10.570    9.766/10.339    6.552/8.995    8.055/10.955    6.683/7.731    10.299/11.209    kinectsp_encoderembed注入
+kinectsp_decoderembed
+office0 | 0.223
+office1 | 0.165
+office2 | 0.382
+office3 | 0.511
+office4 | 0.434
+room0 | 0.487
+room1 | 0.34
+room2 | 0.44
+
+kinectsp_decoder6
+office0 | 0.212
+office1 | 0.156
+office2 | 0.367
+office3 | 0.489
+office4 | 0.412
+room0 | 0.467
+room1 | 0.325
+room2 | 0.423
+
+kinectsp_encoderembed
+office0 | 0.223
+office1 | 0.16
+office2 | 0.378
+office3 | 0.507
+office4 | 0.431
+room0 | 0.484
+room1 | 0.337
+room2 | 0.434
+
+kinectsp_encoder6
+office0 | 0.222
+office1 | 0.165
+office2 | 0.383
+office3 | 0.505
+office4 | 0.433
+room0 | 0.481
+room1 | 0.338
+room2 | 0.433
+
+alacarte_decoderembed

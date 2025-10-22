@@ -156,8 +156,12 @@ class AsymmetricCroCo3DStereo (
             pattern = pattern.repeat(B, 1, 1, 1)  # (B, 3, H, W)
             pattern_embed,pos_embed = self.pattern_encoder_embed(pattern)  # (B, N, enc_embed_dim)
             x += pattern_embed
+        total_blocks = len(self.enc_blocks)
+        half_blocks = total_blocks // 2
         for i,blk in enumerate(self.enc_blocks):
             x = blk(x, pos)
+            if ENCODER and i <= half_blocks:
+                x += pattern_embed
         x = self.enc_norm(x)
         return x, pos, None
 
@@ -208,13 +212,13 @@ class AsymmetricCroCo3DStereo (
         for blk_idx,(blk1, blk2) in enumerate(zip(self.dec_blocks, self.dec_blocks2)):
             f1, _ ,attn_map1= blk1(*final_output[-1][::+1], pos1, pos2)
             f2, _ ,attn_map2= blk2(*final_output[-1][::-1], pos2, pos1)
-            os.makedirs(os.path.join(self.attn_save_dir, f"layer_{blk_idx}"), exist_ok=True)
-            save_path_f1 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img1_to_img2_attn.npy")
-            save_path_f2 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img2_to_img1_attn.npy")
-            attn_map1 = attn_map1.detach().cpu().numpy()
-            attn_map2 = attn_map2.detach().cpu().numpy()
-            np.save(save_path_f1, attn_map1)
-            np.save(save_path_f2, attn_map2)
+            # os.makedirs(os.path.join(self.attn_save_dir, f"layer_{blk_idx}"), exist_ok=True)
+            # save_path_f1 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img1_to_img2_attn.npy")
+            # save_path_f2 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img2_to_img1_attn.npy")
+            # attn_map1 = attn_map1.detach().cpu().numpy()
+            # attn_map2 = attn_map2.detach().cpu().numpy()
+            # np.save(save_path_f1, attn_map1)
+            # np.save(save_path_f2, attn_map2)
             # # store the result
             # if DECODER:
             #     if i < 6:

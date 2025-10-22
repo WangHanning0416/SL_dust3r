@@ -1,6 +1,8 @@
 data/
 checkpoints/
-result/
+result_rgb/
+result_kinectsp/
+vis/
 cross_attn_npy/
 
 # Byte-compiled / optimized / DLL files
