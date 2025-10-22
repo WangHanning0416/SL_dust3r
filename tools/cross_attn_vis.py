@@ -18,7 +18,7 @@ from bokeh.palettes import Viridis256
 # 配置参数（请确保路径正确）
 # --------------------------
 NPY_DIR = "/data3/hanning/dust3r/cross_attn_npy/"  # 改为目录路径
-SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
+SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/frame000001.png"
 TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/frame000000.png"
 TEMPERATURE = 0.02
 PATCH_SIZE = 14  # 14x14=196（根据npy形状调整）

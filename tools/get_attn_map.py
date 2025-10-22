@@ -203,9 +203,9 @@ def main():
         torch.cuda.manual_seed(42)
     
     img1_path = f"/data3/hanning/datasets/Replica/office0/results/frame000000.jpg"
-    img2_path = f"/data3/hanning/datasets/patterns/kinectsp.png"
+    img2_path = f"/data3/hanning/datasets/Replica/office0/results/frame000001.jpg"
     depth1_path = f"/data3/hanning/datasets/Replica/office0/results/depth000000.png"
-    depth2_path = f"/data3/hanning/datasets/patterns/kinectsp.png"
+    depth2_path = f"/data3/hanning/datasets/Replica/office0/results/depth000001.png"
     depth1 = cv2.imread(depth1_path, cv2.IMREAD_UNCHANGED)
     print(depth1.shape)
     depth2 = cv2.imread(depth2_path, cv2.IMREAD_UNCHANGED)
