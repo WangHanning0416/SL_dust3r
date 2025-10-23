@@ -22,6 +22,7 @@ SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/frame000001.png"
 TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/frame000000.png"
 TEMPERATURE = 0.02
 PATCH_SIZE = 14  # 14x14=196（根据npy形状调整）
+FUSED_LAYER_NAME = "融合层（12层均值）"  # 融合层的显示名称
 
 info_div = Div(text="<h3>调试信息面板</h3><p>启动中...</p>")
 
@@ -99,40 +100,96 @@ def flip_attn_map(attn_map):
     debug_print(f"翻转后注意力图形状：{flipped.shape}")
     return flipped
 
+# --------------------------
+# 新增：加载并融合12层注意力图
+# --------------------------
+def load_fused_attn(all_layer_files, data_dir):
+    """
+    加载所有有效层的注意力图，取均值融合
+    :param all_layer_files: 所有单层npy文件的相对路径列表
+    :param data_dir: npy文件根目录
+    :return: 融合后的注意力矩阵（形状与单层一致）
+    """
+    debug_print(f"开始融合12层注意力图，共{len(all_layer_files)}个有效层")
+    fused_list = []  # 存储所有层处理后的注意力矩阵
+    
+    for rel_path in all_layer_files:
+        full_path = os.path.join(data_dir, rel_path)
+        try:
+            # 加载单个层的注意力图（复用原有逻辑）
+            with megfile.smart_open(full_path, 'rb') as f:
+                attn_np = np.load(f)
+            attn_tensor = torch.from_numpy(attn_np)
+            attn_maps_list = [attn_tensor]
+            merged_attn = merge_attn_map(attn_maps_list, suppress_1st_attn=False)
+            merged_attn_np = merged_attn.cpu().numpy()
+            
+            # 调整为标准形状 [1, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE]
+            expected_shape = (1, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE)
+            if merged_attn_np.size != np.prod(expected_shape):
+                debug_print(f"跳过无效层文件：{rel_path}（形状不匹配）")
+                continue
+            
+            attn_layer = merged_attn_np.reshape(expected_shape)[0]  # 去掉第一个维度
+            attn_layer = flip_attn_map(attn_layer)  # 垂直翻转
+            fused_list.append(attn_layer)
+            debug_print(f"成功加载层：{rel_path}，形状：{attn_layer.shape}")
+        
+        except Exception as e:
+            debug_print(f"加载层{rel_path}失败：{str(e)}，跳过该层")
+            continue
+    
+    # 对所有有效层取均值融合
+    if len(fused_list) == 0:
+        raise ValueError("无有效层可融合，请检查单层文件是否正常")
+    
+    fused_attn = np.mean(np.stack(fused_list, axis=0), axis=0)  # 按层维度取均值
+    debug_print(f"12层融合完成，融合后注意力图形状：{fused_attn.shape}")
+    return fused_attn
+
 if not os.path.isdir(NPY_DIR):
     error_div = Div(text=f"<h3>错误：目录不存在！</h3><p>{NPY_DIR}</p>")
     curdoc().add_root(error_div)
 else:
-    # 收集layer_0到layer_11下的注意力图文件
-    npy_files = []
+    # 收集layer_0到layer_11下的注意力图文件（保留原始单层列表）
+    single_layer_files = []  # 存储单层文件的相对路径
     for layer_num in range(12):  # 遍历0-11层
         layer_dir = os.path.join(NPY_DIR, f"layer_{layer_num}")
         attn_file = os.path.join(layer_dir, "img1_to_img2_attn.npy")  # 假设文件名固定
         if os.path.exists(attn_file):
             rel_path = os.path.relpath(attn_file, NPY_DIR)
-            npy_files.append(rel_path)
-            debug_print(f"找到有效文件：{rel_path}")
+            single_layer_files.append(rel_path)
+            debug_print(f"找到有效单层文件：{rel_path}")
         else:
-            debug_print(f"警告：未找到文件 {attn_file}")
+            debug_print(f"警告：未找到单层文件 {attn_file}")
 
-    if not npy_files:
+    if not single_layer_files:
         error_div = Div(text=f"<h3>错误：未找到符合条件的npy文件</h3><p>目录：{NPY_DIR}</p>")
         curdoc().add_root(error_div)
     else:
-        npy_files.sort(key=lambda x: int(re.search(r"layer_(\d+)", x).group(1)))
+        # 排序单层文件（按层号）
+        single_layer_files.sort(key=lambda x: int(re.search(r"layer_(\d+)", x).group(1)))
         data_dir = NPY_DIR  # 数据根目录
+
+        # --------------------------
+        # 修改：文件选择器加入“融合层”选项
+        # --------------------------
+        # 选项格式：[融合层名称, 单层1, 单层2, ...]
+        file_selector_options = [FUSED_LAYER_NAME] + single_layer_files
+        file_selector = Select(
+            title="注意力图文件（含12层融合）:",
+            value=FUSED_LAYER_NAME,  # 默认显示融合层
+            options=file_selector_options
+        )
 
         # 全局变量
         similarity_array = None
         temp = TEMPERATURE
         src_width, src_height = 0, 0  # 源图片尺寸
         trg_width, trg_height = 0, 0  # 目标图片尺寸
+        fused_attn_cache = None  # 缓存融合后的注意力图（避免重复计算）
 
-        file_selector = Select(
-            title="注意力图文件 (layer_0到layer_11):",
-            value=npy_files[0],
-            options=npy_files
-        )
+        # 数据源（与原代码一致）
         trg_source = ColumnDataSource(data={'image': []})
         src_source = ColumnDataSource(data={'image': []})
         heatmap_source = ColumnDataSource(data={'x': [], 'y': [], 'similarity': []})
@@ -141,18 +198,18 @@ else:
         signal_source = ColumnDataSource(data={'x': [], 'y': []})
         trg_selected_dot_source = ColumnDataSource(data={'x': [], 'y': []})
 
-        # 创建图表（不预设尺寸，后续根据图片原始尺寸设置）
+        # 创建图表（与原代码一致）
         hover_tool = HoverTool(tooltips=None, mode='mouse')
         p_trg = figure(tools=[hover_tool, 'tap', 'pan', 'wheel_zoom', 'reset'],
                       title="目标图片", match_aspect=True)
         p_src = figure(tools="pan,wheel_zoom,reset,help",
                       title="源图片", match_aspect=True)
 
-        # 渲染图片（初始设置为临时尺寸）
+        # 渲染图片（与原代码一致）
         trg_image_renderer = p_trg.image_rgba(image='image', x=0, y=0, dw=1, dh=1, source=trg_source)
         src_image_renderer = p_src.image_rgba(image='image', x=0, y=0, dw=1, dh=1, source=src_source)
 
-        # 目标图片交互
+        # 目标图片交互（与原代码一致）
         p_trg.grid.grid_line_color = None
         p_trg.rect(x='x', y='y', width=1, height=1, source=trg_hover_source, fill_alpha=0,
                   line_color=None, hover_fill_alpha=0.3, hover_fill_color='white')
@@ -160,7 +217,7 @@ else:
                                          code="source.data = {x: [cb_obj.x], y: [cb_obj.y]};"))
         p_trg.circle(x='x', y='y', size=10, color='red', source=trg_selected_dot_source)
         
-        # 源图片热力图
+        # 源图片热力图（与原代码一致）
         p_src.grid.grid_line_color = None
         color_mapper = LinearColorMapper(palette=Viridis256, low=0, high=1)
         heatmap_renderer = p_src.rect(x='x', y='y', width=1, height=1,
@@ -168,45 +225,59 @@ else:
                                      fill_alpha=0.5, line_color=None, source=heatmap_source)
         p_src.circle(x='x', y='y', size=10, color='red', source=max_point_source)
 
-        def update_visualization(filepath):
-            global similarity_array, src_width, src_height, trg_width, trg_height
+        # --------------------------
+        # 修改：更新可视化函数（支持融合层）
+        # --------------------------
+        def update_visualization(selected_option):
+            global similarity_array, src_width, src_height, trg_width, trg_height, fused_attn_cache
             try:
                 info_div.text = "<h3>调试信息面板</h3><p>开始加载数据...</p>"
-                name = os.path.basename(filepath)
-                debug_print(f"处理文件：{name}，路径：{filepath}")
+                debug_print(f"当前选择：{selected_option}")
 
-                # 1. 加载npy文件
-                if not os.path.exists(filepath):
-                    raise FileNotFoundError(f"npy文件不存在：{filepath}")
+                # 分支1：选择“融合层”
+                if selected_option == FUSED_LAYER_NAME:
+                    # 缓存融合结果（避免每次切换都重新计算）
+                    if fused_attn_cache is None:
+                        debug_print("缓存中无融合结果，开始计算12层融合...")
+                        fused_attn_cache = load_fused_attn(single_layer_files, data_dir)
+                    similarity_array = fused_attn_cache
+                    debug_print("已加载融合层注意力图")
 
-                with megfile.smart_open(filepath, 'rb') as f:
-                    attn_np = np.load(f)
+                # 分支2：选择“单层”
+                else:
+                    filepath = os.path.join(data_dir, selected_option)
+                    debug_print(f"处理单层文件：{filepath}")
 
-                attn_tensor = torch.from_numpy(attn_np)
-                attn_maps_list = [attn_tensor]
-                merged_attn = merge_attn_map(attn_maps_list, suppress_1st_attn=False)
+                    # 加载单层注意力图（与原代码一致）
+                    if not os.path.exists(filepath):
+                        raise FileNotFoundError(f"npy文件不存在：{filepath}")
 
-                merged_attn_np = merged_attn.cpu().numpy()
-                debug_print(f"转为NumPy后形状：{merged_attn_np.shape}")
-                expected_shape = (1, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE)
-                if merged_attn_np.size != np.prod(expected_shape):
-                    raise ValueError(f"reshape失败：原始大小{merged_attn_np.size} != 预期大小{np.prod(expected_shape)}")
-                similarity_array = merged_attn_np.reshape(expected_shape)[0]
-                similarity_array = flip_attn_map(similarity_array)
-                debug_print(f"最终注意力图形状：{similarity_array.shape}")
+                    with megfile.smart_open(filepath, 'rb') as f:
+                        attn_np = np.load(f)
 
-                # 4. 加载图片（关键：不修改尺寸！）
-                src_img, src_width, src_height = load_image_as_rgba(SOURCE_IMG_PATH)  # 获取宽度和高度
+                    attn_tensor = torch.from_numpy(attn_np)
+                    attn_maps_list = [attn_tensor]
+                    merged_attn = merge_attn_map(attn_maps_list, suppress_1st_attn=False)
+
+                    merged_attn_np = merged_attn.cpu().numpy()
+                    debug_print(f"转为NumPy后形状：{merged_attn_np.shape}")
+                    expected_shape = (1, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE, PATCH_SIZE)
+                    if merged_attn_np.size != np.prod(expected_shape):
+                        raise ValueError(f"reshape失败：原始大小{merged_attn_np.size} != 预期大小{np.prod(expected_shape)}")
+                    similarity_array = merged_attn_np.reshape(expected_shape)[0]
+                    similarity_array = flip_attn_map(similarity_array)
+                    debug_print(f"最终单层注意力图形状：{similarity_array.shape}")
+
+                # 后续加载图片、更新图表的逻辑与原代码完全一致
+                src_img, src_width, src_height = load_image_as_rgba(SOURCE_IMG_PATH)
                 trg_img, trg_width, trg_height = load_image_as_rgba(TARGET_IMG_PATH)
                 debug_print(f"源图片原始尺寸：宽={src_width}，高={src_height}")
                 debug_print(f"目标图片原始尺寸：宽={trg_width}，高={trg_height}")
 
-                # 5. 更新图片数据源（使用原始尺寸）
                 trg_source.data = {'image': [trg_img]}
                 src_source.data = {'image': [src_img]}
                 debug_print("图片数据已更新到数据源（原始尺寸）")
 
-                # 6. 设置图表坐标范围为图片原始像素范围（0~宽，0~高）
                 p_trg.x_range.start, p_trg.x_range.end = 0, trg_width
                 p_trg.y_range.start, p_trg.y_range.end = 0, trg_height
                 p_src.x_range.start, p_src.x_range.end = 0, src_width
@@ -214,13 +285,11 @@ else:
                 debug_print(f"目标图坐标范围：x=0~{trg_width}，y=0~{trg_height}")
                 debug_print(f"源图坐标范围：x=0~{src_width}，y=0~{src_height}")
 
-                # 7. 设置图片显示尺寸为原始尺寸（dw=宽，dh=高）
                 trg_image_renderer.glyph.dw, trg_image_renderer.glyph.dh = trg_width, trg_height
                 src_image_renderer.glyph.dw, src_image_renderer.glyph.dh = src_width, src_height
                 debug_print(f"目标图显示尺寸：dw={trg_width}，dh={trg_height}")
                 debug_print(f"源图显示尺寸：dw={src_width}，dh={src_height}")
 
-                # 8. 图表大小适配图片（最大不超过800px，避免过大）
                 MAX_SIZE = 800
                 trg_scale = min(MAX_SIZE / trg_width, MAX_SIZE / trg_height, 1.0)
                 src_scale = min(MAX_SIZE / src_width, MAX_SIZE / src_height, 1.0)
@@ -231,16 +300,19 @@ else:
                 debug_print(f"目标图表显示尺寸：{trg_display_w}x{trg_display_h}")
                 debug_print(f"源图表显示尺寸：{src_display_w}x{src_display_h}")
 
-                # 9. 更新标题
-                p_trg.title.text = f"目标图片：{Path(TARGET_IMG_PATH).name}（{trg_width}x{trg_height}）"
-                p_src.title.text = f"源图片：{Path(SOURCE_IMG_PATH).name}（{src_width}x{src_height}）"
+                # 更新标题（区分融合层/单层）
+                if selected_option == FUSED_LAYER_NAME:
+                    p_trg.title.text = f"目标图片：{Path(TARGET_IMG_PATH).name}（{trg_width}x{trg_height}）| 12层融合"
+                    p_src.title.text = f"源图片：{Path(SOURCE_IMG_PATH).name}（{src_width}x{src_height}）| 12层融合"
+                else:
+                    layer_num = re.search(r"layer_(\d+)", selected_option).group(1)
+                    p_trg.title.text = f"目标图片：{Path(TARGET_IMG_PATH).name}（{trg_width}x{trg_height}）| layer_{layer_num}"
+                    p_src.title.text = f"源图片：{Path(SOURCE_IMG_PATH).name}（{src_width}x{src_height}）| layer_{layer_num}"
 
-                # 10. 计算patch尺寸（基于原始图片尺寸）
                 h_attn, w_attn = similarity_array.shape[0:2]
-                patch_size_h, patch_size_w = trg_height / h_attn, trg_width / w_attn  # 每个patch的像素大小
+                patch_size_h, patch_size_w = trg_height / h_attn, trg_width / w_attn
                 debug_print(f"patch尺寸：高={patch_size_h:.2f}px，宽={patch_size_w:.2f}px")
 
-                # 11. 初始化热力图网格（每个patch的中心坐标）
                 patch_x = np.tile(np.arange(w_attn) * patch_size_w + patch_size_w/2, h_attn)
                 patch_y = np.repeat(
                     (h_attn - 1 - np.arange(h_attn)) * patch_size_h + patch_size_h/2, 
@@ -251,15 +323,14 @@ else:
                 heatmap_renderer.glyph.width, heatmap_renderer.glyph.height = patch_size_w, patch_size_h
                 debug_print(f"热力图网格初始化完成，patch数量：{len(patch_x)}")
 
-                # 12. 初始化热力图
-                update_heatmap(None, None, {'x': [trg_width/2], 'y': [trg_height/2]})  # 从图片中心开始
+                update_heatmap(None, None, {'x': [trg_width/2], 'y': [trg_height/2]})
                 debug_print("初始化完成，可视化准备就绪")
 
             except Exception as e:
                 debug_print(f"加载失败：{str(e)}")
                 raise
 
-
+        # update_heatmap和on_file_select函数与原代码一致
         def update_heatmap(attr, old, new):
             global temp
             try:
@@ -298,16 +369,12 @@ else:
             except Exception as e:
                 debug_print(f"update_heatmap错误：{str(e)}")
 
-
         def on_file_select(attr, old, new):
             debug_print(f"切换文件：{new}")
-            # 拼接完整路径（数据目录 + 相对路径）
-            full_path = os.path.join(data_dir, new)
-            update_visualization(full_path)
-
+            update_visualization(new)  # 直接传入选择的选项（融合层/单层）
 
         # --------------------------
-        # 绑定回调和布局
+        # 绑定回调和布局（与原代码一致）
         # --------------------------
         file_selector.on_change('value', on_file_select)
         signal_source.on_change('data', update_heatmap)
@@ -315,8 +382,8 @@ else:
         plots = row(p_trg, p_src)
         main_layout = row(controls, plots)
         curdoc().add_root(main_layout)
-        curdoc().title = "注意力图可视化（layer_0到layer_11）"
+        curdoc().title = "注意力图可视化（含12层融合）"
         
-        # 初始化显示第一个文件
+        # 初始化显示融合层
         debug_print("启动初始化...")
-        update_visualization(os.path.join(data_dir, npy_files[0]))
+        update_visualization(FUSED_LAYER_NAME)

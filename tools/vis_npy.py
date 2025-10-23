@@ -69,12 +69,12 @@ def colored_pred_ply(pred1, gt1, valid1, pred2, gt2, valid2,output_ply_path):
             f.write(f'{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}\n')
 
 if __name__ == "__main__":
-    npy_dir =  "/data3/hanning/dust3r/result_rgb/room0/npy"
+    npy_dir =  "/data3/hanning/dust3r/result_rgb/office3/npy"
     pred_pcd1 = np.load(join(npy_dir, "predicted_pts3d.npy")).astype(np.float32)
     gt_pcd1 = np.load(join(npy_dir, "gt_pts3d.npy")).astype(np.float32)
     valid1 = np.load(join(npy_dir, "gt_valid_mask.npy")).astype(bool)
     
-    npy_dir =  "/data3/hanning/dust3r/result_kinectsp/room0/npy"
+    npy_dir =  "/data3/hanning/dust3r/result_kinectsp/office3/npy"
     pred_pcd2 = np.load(join(npy_dir, "predicted_pts3d.npy")).astype(np.float32)
     gt_pcd2 = np.load(join(npy_dir, "gt_pts3d.npy")).astype(np.float32)
     valid2 = np.load(join(npy_dir, "gt_valid_mask.npy")).astype(bool)

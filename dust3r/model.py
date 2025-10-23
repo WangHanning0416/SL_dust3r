@@ -26,7 +26,7 @@ hf_version_number = huggingface_hub.__version__
 assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated huggingface_hub version, " "please reinstall requirements.txt")
 
 DECODER = False
-ENCODER = False                                                                  
+ENCODER = False                                                               
 
 def load_model(model_path, device, verbose=True):
     if verbose:
@@ -160,8 +160,8 @@ class AsymmetricCroCo3DStereo (
         half_blocks = total_blocks // 2
         for i,blk in enumerate(self.enc_blocks):
             x = blk(x, pos)
-            if ENCODER and i <= half_blocks:
-                x += pattern_embed
+            # if ENCODER and i <= half_blocks:
+            #     x += pattern_embed
         x = self.enc_norm(x)
         return x, pos, None
 

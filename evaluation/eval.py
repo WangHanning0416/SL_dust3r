@@ -40,49 +40,34 @@ def calcu_single_frame_loss(gt_pts3d, pred_pts3d, valid_mask):
     return frame_loss
 
 
-def main():
-    args = parse_args()
-    np.random.seed(42)
+def evaluate_scene_data(scene_name: str, 
+                        pred_pts_list: list[np.ndarray], 
+                        gt_pts_list: list[np.ndarray], 
+                        valid_mask_list: list[np.ndarray]) -> tuple[str, float or str]:
+    """
+    评估整个场景中所有图像对的平均损失。
     
-    scenes = ["office0", "office1", "office2", "office3", "office4", "room0", "room1", "room2"]
+    Args:
+        scene_name: 场景名称.
+        pred_pts_list: 场景中所有图像对的预测点云列表 (List[(H*W, 3)]).
+        gt_pts_list: 场景中所有图像对的 GT 点云列表 (List[(H*W, 3)]).
+        valid_mask_list: 场景中所有图像对的 GT 有效掩码列表 (List[(H*W,)]).
 
-    summary_lines = [
-        "场景 | GT尺度（平均值）归一化-中位数误差\n",
-        "-" * 50 + "\n"
-    ]
+    Returns:
+        (场景名称, 平均损失或错误信息).
+    """
+    all_losses = []
     
-    for scene_name in scenes:
-        npy_dir = join(args.root_dir, scene_name, "npy")
-        # 数据加载容错
-        try:
-            pred_pcd = np.load(join(npy_dir, "predicted_pts3d.npy")).astype(np.float32)
-            gt_pcd = np.load(join(npy_dir, "gt_pts3d.npy")).astype(np.float32)
-            valid_pcd = np.load(join(npy_dir, "gt_valid_mask.npy")).astype(bool)
-        except Exception:
-            summary_lines.append(f"{scene_name} | 数据失败\n")
-            continue
+    for i in tqdm(range(len(pred_pts_list)), desc=f"Evaluating {scene_name}"):
+        # 注意：这里直接使用 list 中的元素，它们已经是展平后的 (H*W, 3) 数组
+        frame_loss = calcu_single_frame_loss(
+            gt_pts_list[i], pred_pts_list[i], valid_mask_list[i]
+        )
+        if frame_loss is not None:
+            all_losses.append(frame_loss)
 
-        loss = []
+    if not all_losses:
+        return scene_name, "无有效帧"
 
-        for frame_idx in tqdm(range(len(pred_pcd)), desc=f"处理 {scene_name}"):
-            frame_loss = calcu_single_frame_loss(
-                gt_pcd[frame_idx], pred_pcd[frame_idx], valid_pcd[frame_idx]
-            )
-            if frame_loss is not None:
-                loss.append(frame_loss)
-        
-        if not loss:
-            summary_lines.append(f"{scene_name} | 无有效帧\n")
-            continue
-        
-        avg_loss = np.round(np.mean(loss), 3)
-        avg_loss = float(f"{avg_loss:.3f}")
-        summary_lines.append(f"{scene_name} | {avg_loss}\n")
-
-    with open(args.summary_path, "w", encoding="utf-8") as f:
-        f.writelines(summary_lines)
-    print(f"结果已保存至: {args.summary_path}")
-
-
-if __name__ == "__main__":
-    main()
+    avg_loss = np.round(np.mean(all_losses), 3)
+    return scene_name, float(f"{avg_loss:.3f}")

@@ -1,0 +1,18 @@
+RGB
+office0: 0.215
+office1: 0.159
+office2: 0.202
+office3: 0.205
+office4: 0.193
+room0: 0.168
+room1: 0.118
+room2: 0.242
+kinectsp
+office0: 0.21
+office1: 0.165
+office2: 0.356
+office3: 0.475
+office4: 0.385
+room0: 0.493
+room1: 0.34
+room2: 0.422

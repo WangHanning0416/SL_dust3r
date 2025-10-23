@@ -13,7 +13,7 @@ from dust3r.datasets.utils.transforms import ImgNorm  # 导入图像归一化处
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r1/checkpoints/dust3r_rgb_224/checkpoint-best.pth",
+    "model_weight_path": "/data3/hanning/dust3r/checkpoints/DUSt3R_ViTLarge_BaseDecoder_224_linear.pth",
     "resolution": 224,  # 图像分辨率
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
