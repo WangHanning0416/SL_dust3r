@@ -276,7 +276,7 @@ class FeatureFusionBlock(nn.Module):
         """
         normed_context = self.norm_kv(context) 
         
-        fused_query, _ = self.cross_attn(
+        fused_query, attn_map = self.cross_attn(
             self.norm_q(query), 
             normed_context, 
             normed_context, 
@@ -286,4 +286,4 @@ class FeatureFusionBlock(nn.Module):
         query = query + self.drop_path1(fused_query)
         query = query + self.drop_path2(self.mlp(self.norm_mlp(query)))
         
-        return query
+        return query,attn_map

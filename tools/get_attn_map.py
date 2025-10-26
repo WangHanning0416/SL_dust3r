@@ -13,25 +13,12 @@ from dust3r.datasets.utils.transforms import ImgNorm  # 导入图像归一化处
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r/checkpoints/DUSt3R_ViTLarge_BaseDecoder_224_linear.pth",
+    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_decoder_crossattn/checkpoint-best.pth",
     "resolution": 224,  # 图像分辨率
-    "device": "cuda" if torch.cuda.is_available() else "cpu",
+    "device": "cuda" if torch.cuda.is_available() else "cpu", 
     "conf_threshold": 0.3,
-    "base_result_dir": "/data3/hanning/dust3r/result/",  # 基础结果目录
 }
 
-def init_scene_dir(scene_name):
-    scene_dir = os.path.join(CONFIG["base_result_dir"], scene_name)
-    npy_dir = os.path.join(scene_dir, "npy")
-    ply_dir = os.path.join(scene_dir, "ply")
-    
-    # 创建目录（如果不存在）
-    for dir_path in [scene_dir, npy_dir, ply_dir]:
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path)
-    
-    print(f"场景目录已准备：{os.path.abspath(scene_dir)}")
-    return scene_dir, npy_dir, ply_dir
 
 def init_model():
     """初始化原始模型"""
@@ -202,8 +189,8 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
     
-    img1_path = f"/data3/hanning/datasets/Replica/office0/results/frame000000.jpg"
-    img2_path = f"/data3/hanning/datasets/Replica/office0/results/frame000001.jpg"
+    img1_path = f"/data3/hanning/datasets/Replica_kinectsp/office0/results/frame000000.jpg"
+    img2_path = f"/data3/hanning/datasets/Replica_kinectsp/office0/results/frame000001.jpg"
     depth1_path = f"/data3/hanning/datasets/Replica/office0/results/depth000000.png"
     depth2_path = f"/data3/hanning/datasets/Replica/office0/results/depth000001.png"
     depth1 = cv2.imread(depth1_path, cv2.IMREAD_UNCHANGED)

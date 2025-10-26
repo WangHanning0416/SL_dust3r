@@ -7,5 +7,4 @@ torchrun --nproc_per_node=4 train.py \
     --pretrained "/data3/hanning/dust3r1/checkpoints/CroCo_V2_ViTLarge_BaseDecoder.pth" \
     --lr 0.0001 --min_lr 1e-06 --warmup_epochs 4 --epochs 60 --batch_size 16 --accum_iter 1 \
     --save_freq 5 --keep_freq 10 --eval_freq 1 \
-    --output_dir "checkpoints/dust3r_SL_224_kinectic_view2pattern"	  
-
+    --output_dir "checkpoints/dust3r_SL_224_kinectic_view2pattern2"	  

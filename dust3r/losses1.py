@@ -227,15 +227,15 @@ class ConfLoss (MultiLoss):
 
         # weight by confidence
         conf1, log_conf1 = self.get_conf_log(pred1['conf'][msk1])
-        # conf2, log_conf2 = self.get_conf_log(pred2['conf'][msk2])
+        conf2, log_conf2 = self.get_conf_log(pred2['conf'][msk2])
         conf_loss1 = loss1 * conf1 - self.alpha * log_conf1
-        # conf_loss2 = loss2 * conf2 - self.alpha * log_conf2
+        conf_loss2 = loss2 * conf2 - self.alpha * log_conf2
 
         # average + nan protection (in case of no valid pixels at all)
         conf_loss1 = conf_loss1.mean() if conf_loss1.numel() > 0 else 0
-        conf_loss2 = 0
+        conf_loss2 = conf_loss2.mean() if conf_loss2.numel() > 0 else 0
 
-        return conf_loss1 , dict(conf_loss_1=float(conf_loss1), conf_loss2=float(conf_loss2), **details)
+        return conf_loss1 + conf_loss2, dict(conf_loss_1=float(conf_loss1), conf_loss2=float(conf_loss2), **details)
 
 
 class Regr3D_ShiftInv (Regr3D):

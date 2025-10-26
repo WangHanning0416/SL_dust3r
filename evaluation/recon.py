@@ -15,7 +15,7 @@ from evaluation.eval import evaluate_scene_data
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_decoder_crossattn2/checkpoint-best.pth",
+    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_view2pattern2/checkpoint-best.pth",
     "resolution": 224,  
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
@@ -336,10 +336,9 @@ def process_scene(model, scene_name, image_pairs, intrinsics):
         valid_mask_list=all_gt_valid_masks_list
     )
 
-    #将结果写到指定txt文件的末尾去
-    summary_path = "/data3/hanning/dust3r/evaluation/result.txt"
+    summary_path = "/data3/hanning/dust3r/evaluation/result.csv"
     with open(summary_path, 'a') as f:
-        f.write(f"{scene_name}: {loss}\n")
+        f.write(f",{loss}")
 
     print(f"\n场景 {scene_name} 处理完成，共 {len(all_pred_pts_list)} 个图像对结果已保存。")
 

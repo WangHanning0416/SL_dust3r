@@ -13,16 +13,12 @@ from bokeh.models import (ColumnDataSource, CustomJS, LinearColorMapper, HoverTo
                           Select, Div)
 from bokeh.palettes import Viridis256
 
-
-# --------------------------
-# 配置参数（请确保路径正确）
-# --------------------------
 NPY_DIR = "/data3/hanning/dust3r/cross_attn_npy/"  # 改为目录路径
-SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/frame000001.png"
-TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/frame000000.png"
+TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/pattern000001.png"
+SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
 TEMPERATURE = 0.02
 PATCH_SIZE = 14  # 14x14=196（根据npy形状调整）
-FUSED_LAYER_NAME = "融合层（12层均值）"  # 融合层的显示名称
+FUSED_LAYER_NAME = "融合层"  # 融合层的显示名称
 
 info_div = Div(text="<h3>调试信息面板</h3><p>启动中...</p>")
 
