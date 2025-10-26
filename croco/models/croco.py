@@ -13,7 +13,7 @@ import torch.nn as nn
 torch.backends.cuda.matmul.allow_tf32 = True # for gpu >= Ampere and pytorch >= 1.12
 from functools import partial
 
-from models.blocks import Block, DecoderBlock, PatchEmbed
+from models.blocks import Block, DecoderBlock, PatchEmbed, FeatureFusionBlock
 from models.pos_embed import get_2d_sincos_pos_embed, RoPE2D 
 from models.masking import RandomMask
 
@@ -77,10 +77,23 @@ class CroCoNet(nn.Module):
         # decoder 
         self._set_decoder(enc_embed_dim, dec_embed_dim, dec_num_heads, dec_depth, mlp_ratio, norm_layer, norm_im2_in_dec)
         
-        # prediction head 
+        self.pattern_encoder_fusor1 = nn.ModuleList([
+            FeatureFusionBlock(enc_embed_dim, enc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+            for i in range(6)])
+        self.pattern_encoder_fusor2 = nn.ModuleList([
+            FeatureFusionBlock(enc_embed_dim, enc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+            for i in range(6)])
+
+        self.pattern_fusors1 = nn.ModuleList([
+            FeatureFusionBlock(dim=dec_embed_dim, num_heads=dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+            for _ in range(6) 
+        ])
+        self.pattern_fusors2 = nn.ModuleList([
+            FeatureFusionBlock(dim=dec_embed_dim, num_heads=dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+            for _ in range(6)
+        ])
+
         self._set_prediction_head(dec_embed_dim, patch_size)
-        
-        # initializer weights
         self.initialize_weights()           
 
     def _set_patch_embed(self, img_size=224, patch_size=16, enc_embed_dim=768):

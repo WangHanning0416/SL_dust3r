@@ -242,3 +242,48 @@ class PatchEmbed(nn.Module):
         w = self.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1])) 
 
+class FeatureFusionBlock(nn.Module):
+    """
+    一个用于将外部特征（pattern_embed）融合到主特征序列（f1/f2）中的块。
+    层归一化 -> 交叉注意力 -> 残差连接 -> 层归一化 -> MLP -> 残差连接
+    """
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, rope=None):
+        super().__init__()
+        self.norm_q = norm_layer(dim)    # 对 Query (f1/f2) 进行归一化
+        self.norm_kv = norm_layer(dim)   # 对 Key/Value (pattern_embed) 进行归一化
+        self.cross_attn = CrossAttention(
+            dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, 
+            attn_drop=attn_drop, proj_drop=drop
+        )
+        
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm_mlp = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, query, context, query_pos, context_pos):
+        """
+        Args:
+            query (torch.Tensor): 主特征序列 (e.g., f1, f2)
+            context (torch.Tensor): 外部特征 (e.g., pattern_embed)，同时作为 Key 和 Value
+            query_pos (torch.Tensor): query 的位置编码 (e.g., pos1, pos2)
+            context_pos (torch.Tensor): context 的位置编码 (e.g., pos_embed)
+        Returns:
+            torch.Tensor: 融合后的特征序列
+        """
+        normed_context = self.norm_kv(context) 
+        
+        fused_query, _ = self.cross_attn(
+            self.norm_q(query), 
+            normed_context, 
+            normed_context, 
+            query_pos, 
+            context_pos
+        )
+        query = query + self.drop_path1(fused_query)
+        query = query + self.drop_path2(self.mlp(self.norm_mlp(query)))
+        
+        return query

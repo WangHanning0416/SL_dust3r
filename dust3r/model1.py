@@ -7,24 +7,26 @@
 from copy import deepcopy
 import torch
 import os
+import numpy as np
 from packaging import version
 import huggingface_hub
-import torch.nn as nn
-import cv2
 
 from .utils.misc import fill_default_args, freeze_all_params, is_symmetrized, interleave, transpose_to_landscape
 from .heads import head_factory
 from dust3r.patch_embed import get_patch_embed,PatchEmbed_Mlp
 
+
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
+import cv2
 
 inf = float('inf')
 
 hf_version_number = huggingface_hub.__version__
-assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated huggingface_hub version, "
-                                                                     "please reinstall requirements.txt")
+assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated huggingface_hub version, " "please reinstall requirements.txt")
 
+DECODER = True
+ENCODER = False                                                             
 
 def load_model(model_path, device, verbose=True):
     if verbose:
@@ -72,24 +74,27 @@ class AsymmetricCroCo3DStereo (
 
         # dust3r specific initialization
         self.dec_blocks2 = deepcopy(self.dec_blocks)
-        self.img_size = croco_kwargs.get('img_size', 224)
-        self.patch_size = croco_kwargs.get('patch_size', 16)
-        self.pattern_decoder_embed = PatchEmbed_Mlp(
-            img_size=self.img_size,
-            patch_size=self.patch_size,
-            in_chans=3,
-            embed_dim=self.dec_embed_dim,  
-            flatten=True 
-        )
-        self.pattern_encoder_embed = PatchEmbed_Mlp(
-            img_size=self.img_size,
-            patch_size=self.patch_size,
-            in_chans=3,
-            embed_dim=self.enc_embed_dim,  
-            flatten=True 
-        )
         self.set_downstream_head(output_mode, head_type, landscape_only, depth_mode, conf_mode, **croco_kwargs)
         self.set_freeze(freeze)
+        self.attn_save_dir = "/data3/hanning/dust3r/cross_attn_npy"
+        self.img_size = croco_kwargs.get('img_size', 224)
+        self.patch_size = croco_kwargs.get('patch_size', 16)
+        if ENCODER:
+            self.pattern_encoder_embed = PatchEmbed_Mlp(
+                img_size=self.img_size,
+                patch_size=self.patch_size,
+                in_chans=3,
+                embed_dim=self.enc_embed_dim,  
+                flatten=True 
+            )
+        if DECODER:
+            self.pattern_decoder_embed = PatchEmbed_Mlp(
+                img_size=self.img_size,
+                patch_size=self.patch_size,
+                in_chans=3,
+                embed_dim=self.dec_embed_dim,  
+                flatten=True 
+            )
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -107,7 +112,6 @@ class AsymmetricCroCo3DStereo (
         self.patch_embed = get_patch_embed(self.patch_embed_cls, img_size, patch_size, enc_embed_dim)
 
     def load_state_dict(self, ckpt, **kw):
-        # duplicate all weights for the second decoder if not present
         new_ckpt = dict(ckpt)
         if not any(k.startswith('dec_blocks2') for k in ckpt):
             for key, value in ckpt.items():
@@ -115,8 +119,7 @@ class AsymmetricCroCo3DStereo (
                     new_ckpt[key.replace('dec_blocks', 'dec_blocks2')] = value
         return super().load_state_dict(new_ckpt, **kw)
 
-    def set_freeze(self, freeze):  # this is for use by downstream models
-        self.freeze = freeze
+    def set_freeze(self, freeze): 
         to_be_frozen = {
             'none': [],
             'mask': [self.mask_token],
@@ -136,32 +139,29 @@ class AsymmetricCroCo3DStereo (
         self.head_type = head_type
         self.depth_mode = depth_mode
         self.conf_mode = conf_mode
-        # allocate heads
         self.downstream_head1 = head_factory(head_type, output_mode, self, has_conf=bool(conf_mode))
         self.downstream_head2 = head_factory(head_type, output_mode, self, has_conf=bool(conf_mode))
-        # magic wrapper
         self.head1 = transpose_to_landscape(self.downstream_head1, activate=landscape_only)
         self.head2 = transpose_to_landscape(self.downstream_head2, activate=landscape_only)
 
     def _encode_image(self, image, true_shape):
         x, pos = self.patch_embed(image, true_shape=true_shape)
-
-        B = x.shape[0]
-        pattern_path = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
-        pattern = cv2.imread(pattern_path)
-        device = x.device
-        pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0
-        pattern = pattern.unsqueeze(0).to(device)
-        pattern = pattern.repeat(B, 1, 1, 1)
-        pattern_embed, pos_embed = self.pattern_encoder_embed(pattern)
-
-        assert self.enc_pos_embed is None
-        i = 0
-        for blk in self.enc_blocks:
-            if i < 6:
-                x = self.pattern_encoder_fusor1[i](x, pattern_embed, pos, pos_embed)
-                i += 1
+        if ENCODER:
+            B = x.shape[0]
+            pattern_path = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
+            pattern = cv2.imread(pattern_path)
+            device = x.device
+            pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0  # (3, H, W)
+            pattern = pattern.unsqueeze(0).to(device)
+            pattern = pattern.repeat(B, 1, 1, 1)  # (B, 3, H, W)
+            pattern_embed,pos_embed = self.pattern_encoder_embed(pattern)  # (B, N, enc_embed_dim)
+            x += pattern_embed
+        total_blocks = len(self.enc_blocks)
+        half_blocks = total_blocks // 2
+        for i,blk in enumerate(self.enc_blocks):
             x = blk(x, pos)
+            # if ENCODER and i <= half_blocks:
+            #     x += pattern_embed
         x = self.enc_norm(x)
         return x, pos, None
 
@@ -180,11 +180,8 @@ class AsymmetricCroCo3DStereo (
         img1 = view1['img']
         img2 = view2['img']
         B = img1.shape[0]
-        # Recover true_shape when available, otherwise assume that the img shape is the true one
         shape1 = view1.get('true_shape', torch.tensor(img1.shape[-2:])[None].repeat(B, 1))
         shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
-        # warning! maybe the images have different portrait/landscape orientations
-
         if is_symmetrized(view1, view2):
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1[::2], img2[::2], shape1[::2], shape2[::2])
             feat1, feat2 = interleave(feat1, feat2)
@@ -195,32 +192,41 @@ class AsymmetricCroCo3DStereo (
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)
 
     def _decoder(self, f1, pos1, f2, pos2):
-        final_output = [(f1, f2)]  
+        final_output = [(f1, f2)]
         f1 = self.decoder_embed(f1)
         f2 = self.decoder_embed(f2)
-        
-        # B = f1.shape[0]
-        # pattern_path = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
-        # pattern = cv2.imread(pattern_path)
-        # device = f1.device
-        # pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0
-        # pattern = pattern.unsqueeze(0).to(device)
-        # pattern = pattern.repeat(B, 1, 1, 1)
-        # pattern_embed, pos_embed = self.pattern_decoder_embed(pattern)
-        
+        if DECODER:
+            B = f1.shape[0]
+            pattern_path = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
+            pattern = cv2.imread(pattern_path)
+            device = f1.device
+            pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0  # (3, H, W)
+            pattern = pattern.unsqueeze(0).to(device)
+            pattern = pattern.repeat(B, 1, 1, 1)  # (B, 3, H, W)
+            pattern_embed,pos_embed = self.pattern_decoder_embed(pattern)  # (B, N, enc_embed_dim)
+            f1 += pattern_embed
+            f2 += pattern_embed
+
         final_output.append((f1, f2))
         i = 0
-        for blk1, blk2 in zip(self.dec_blocks, self.dec_blocks2):
-            # if i < 6:
-            #     f1 = self.pattern_fusors1[i](final_output[-1][0], pattern_embed, pos1, pos_embed)
-            #     f2 = self.pattern_fusors2[i](final_output[-1][1], pattern_embed, pos2, pos_embed)
-            #     final_output.append((f1, f2))
-            #     i += 1
-            f1 , _ , attn_map1 = blk1(*final_output[-1][::+1], pos1, pos2)
-            f2 , _ , attn_map2 = blk2(*final_output[-1][::-1], pos2, pos1)
+        for blk_idx,(blk1, blk2) in enumerate(zip(self.dec_blocks, self.dec_blocks2)):
+            f1, _ ,attn_map1= blk1(*final_output[-1][::+1], pos1, pos2)
+            f2, _ ,attn_map2= blk2(*final_output[-1][::-1], pos2, pos1)
+            # os.makedirs(os.path.join(self.attn_save_dir, f"layer_{blk_idx}"), exist_ok=True)
+            # save_path_f1 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img1_to_img2_attn.npy")
+            # save_path_f2 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img2_to_img1_attn.npy")
+            # attn_map1 = attn_map1.detach().cpu().numpy()
+            # attn_map2 = attn_map2.detach().cpu().numpy()
+            # np.save(save_path_f1, attn_map1)
+            # np.save(save_path_f2, attn_map2)
+            # # store the result
+            if DECODER:
+                if i < 6:
+                    f1 += pattern_embed
+                    f2 += pattern_embed
+                i += 1
             final_output.append((f1, f2))
-
-        del final_output[1] 
+        del final_output[1]  # duplicate with final_output[0]
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
         return zip(*final_output)
 
@@ -232,10 +238,12 @@ class AsymmetricCroCo3DStereo (
 
     def forward(self, view1, view2):
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
+
         dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
+
         with torch.cuda.amp.autocast(enabled=False):
             res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
 
-        res2['pts3d_in_other_view'] = res2.pop('pts3d')  # predict view2's pts3d in view1's frame
+        res2['pts3d_in_other_view'] = res2.pop('pts3d') 
         return res1, res2

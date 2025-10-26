@@ -15,7 +15,7 @@ from evaluation.eval import evaluate_scene_data
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r1/checkpoints/dust3r_SL_224/checkpoint-best.pth",
+    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_decoder_crossattn2/checkpoint-best.pth",
     "resolution": 224,  
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
