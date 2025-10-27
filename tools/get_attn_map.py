@@ -13,7 +13,7 @@ from dust3r.datasets.utils.transforms import ImgNorm  # 导入图像归一化处
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_decoder_crossattn/checkpoint-best.pth",
+    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_decoder_crossattn2/checkpoint-best.pth",
     "resolution": 224,  # 图像分辨率
     "device": "cuda" if torch.cuda.is_available() else "cpu", 
     "conf_threshold": 0.3,
@@ -191,12 +191,13 @@ def main():
     
     img1_path = f"/data3/hanning/datasets/Replica_kinectsp/office0/results/frame000000.jpg"
     img2_path = f"/data3/hanning/datasets/Replica_kinectsp/office0/results/frame000001.jpg"
+    # img2_path = f"/data3/hanning/datasets/patterns/kinectsp.png"
     depth1_path = f"/data3/hanning/datasets/Replica/office0/results/depth000000.png"
     depth2_path = f"/data3/hanning/datasets/Replica/office0/results/depth000001.png"
+    # depth2_path = f"/data3/hanning/datasets/patterns/kinectsp.png"
+
     depth1 = cv2.imread(depth1_path, cv2.IMREAD_UNCHANGED)
-    print(depth1.shape)
     depth2 = cv2.imread(depth2_path, cv2.IMREAD_UNCHANGED)
-    print(depth2.shape)
             
     image_pairs.append((img1_path, img2_path, depth1_path, depth2_path))
 

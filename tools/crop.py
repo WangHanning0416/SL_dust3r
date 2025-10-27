@@ -9,7 +9,7 @@ from dust3r.datasets.utils.transforms import ImgNorm
 from dust3r.utils.geometry import depthmap_to_absolute_camera_coordinates
 import dust3r.datasets.utils.cropping as cropping
 
-path = "/data3/hanning/datasets/Replica_kinectsp/office0/results/frame000001.jpg"
+path = "/data3/hanning/datasets/Replica_kinectsp/office0/results/frame000002.jpg"
 
 
 def _crop_resize_if_necessary(image, depthmap, intrinsics, resolution, rng=None, info=None):
@@ -82,4 +82,4 @@ if rgb_image.shape[2] == 3:
         rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
 
 # 6. 保存图像
-cv2.imwrite("./tools/pattern000001.png", rgb_image)
+cv2.imwrite("./tools/pattern000002.png", rgb_image)

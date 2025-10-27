@@ -13,12 +13,13 @@ from bokeh.models import (ColumnDataSource, CustomJS, LinearColorMapper, HoverTo
                           Select, Div)
 from bokeh.palettes import Viridis256
 
-NPY_DIR = "/data3/hanning/dust3r/cross_attn_npy/"  # 改为目录路径
-TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/pattern000001.png"
-SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
+NPY_DIR = "/data3/hanning/dust3r/cross_attn_npy/" 
+TARGET_IMG_PATH = "/data3/hanning/dust3r/tools/pattern000000.png"
+# SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/kinectsp_crop.png"
+SOURCE_IMG_PATH = "/data3/hanning/dust3r/tools/pattern000001.png"
 TEMPERATURE = 0.02
-PATCH_SIZE = 14  # 14x14=196（根据npy形状调整）
-FUSED_LAYER_NAME = "融合层"  # 融合层的显示名称
+PATCH_SIZE = 14  
+FUSED_LAYER_NAME = "融合层"  
 
 info_div = Div(text="<h3>调试信息面板</h3><p>启动中...</p>")
 
@@ -27,18 +28,10 @@ def debug_print(message):
     info_div.text += f"<br>[DEBUG] {message}"
 
 def merge_attn_map(attn_maps, suppress_1st_attn=False, attn_layers_adopted: list[int] = None):
-    """合并多层多头注意力图（带日志）"""
-    debug_print(f"进入merge_attn_map，输入长度：{len(attn_maps)}")
     try:
         attn_maps = attn_maps if attn_layers_adopted is None else [attn_maps[idx] for idx in attn_layers_adopted]
-        debug_print(f"筛选后层数：{len(attn_maps)}，单一层形状：{attn_maps[0].shape}")
-        
         attn_maps = torch.stack(attn_maps, dim=1)
-        debug_print(f"堆叠后形状：{attn_maps.shape}")
-        
         attn_maps = torch.mean(attn_maps, dim=(1, 2))
-        debug_print(f"合并层和头后形状：{attn_maps.shape}")
-        
         if suppress_1st_attn:
             attn_maps[:, :, 0] = attn_maps.min()
             debug_print("已抑制第一个token的注意力")

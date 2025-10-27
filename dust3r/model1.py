@@ -219,7 +219,7 @@ class AsymmetricCroCo3DStereo (
             # attn_map2 = attn_map2.detach().cpu().numpy()
             # np.save(save_path_f1, attn_map1)
             # np.save(save_path_f2, attn_map2)
-            # # store the result
+            # store the result
             if DECODER:
                 if i < 6:
                     f1 += pattern_embed
