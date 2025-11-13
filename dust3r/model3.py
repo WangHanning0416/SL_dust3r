@@ -174,8 +174,8 @@ class AsymmetricCroCo3DStereo (
         final_output.append((f1, f2))
         i = 0
         for blk_idx,(blk1, blk2) in enumerate(zip(self.dec_blocks, self.dec_blocks2)):
-            f1, attn_map1= blk1(*final_output[-1][::+1], pos1, pos2)
-            f2, attn_map2= blk2(*final_output[-1][::-1], pos2, pos1)
+            f1 , _ , attnmap1= blk1(*final_output[-1][::+1], pos1, pos2)
+            f2 , _ , attnmap2= blk2(*final_output[-1][::-1], pos2, pos1)
             final_output.append((f1, f2))
         del final_output[1]  
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
@@ -187,14 +187,16 @@ class AsymmetricCroCo3DStereo (
         return head(decout, img_shape)
 
     def forward(self, view1, view2):
+        # print(view1['img'].shape)
         B = view1['img'].shape[0]
-        pattern_path = "/data/hanning/dust3r/datasets/patterns/kinectsp.png"
+        pattern_path = "/data/hanning/dust3r1/datasets/patterns/kinectsp_crop.png"
         pattern = cv2.imread(pattern_path)
         device = view1['img'].device
         pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0
         pattern = pattern.unsqueeze(0).to(device)
         pattern = pattern.repeat(B, 1, 1, 1)
         view2['img'] = pattern
+        # print(view2['img'].shape)
 
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1,view2)
 
