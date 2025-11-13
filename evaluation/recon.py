@@ -15,11 +15,11 @@ from evaluation.eval import evaluate_scene_data
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/data3/hanning/dust3r/checkpoints/dust3r_SL_224_kinectic_view2pattern2/checkpoint-best.pth",
+    "model_weight_path": "/nvme/data/hanning/checkpoints/dust3r_SL_224_pattern2/checkpoint-best.pth",
     "resolution": 224,  
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
-    "base_result_dir": "/data3/hanning/dust3r/result_rgb/",  # 基础结果目录
+    "base_result_dir": "/data/hanning/dust3r/result_rgb/",  # 基础结果目录
 }
 
 def init_scene_dir(scene_name):
@@ -336,7 +336,7 @@ def process_scene(model, scene_name, image_pairs, intrinsics):
         valid_mask_list=all_gt_valid_masks_list
     )
 
-    summary_path = "/data3/hanning/dust3r/evaluation/result.csv"
+    summary_path = "/data/hanning/SL_dust3r/evaluation/result.csv"
     with open(summary_path, 'a') as f:
         f.write(f",{loss}")
 
@@ -361,12 +361,12 @@ def main():
         image_pairs = []
         idx = 0
         while True:
-            # 确保这些路径是正确的，并且文件存在
-            img1_path = f"/data3/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx:06d}.jpg"
-            img2_path = f"/data3/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx+1:06d}.jpg"
-            depth1_path = f"/data3/hanning/datasets/Replica/{scene_name}/results/depth{idx:06d}.png"
-            depth2_path = f"/data3/hanning/datasets/Replica/{scene_name}/results/depth{idx+1:06d}.png"
+            img1_path = f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx:06d}.jpg"
+            img2_path = f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx+10:06d}.jpg"
+            depth1_path = f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/depth{idx:06d}.png"
+            depth2_path =  f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/depth{idx+10:06d}.png"
             
+
             if all(os.path.exists(p) for p in [img1_path, img2_path, depth1_path, depth2_path]):
                 image_pairs.append((img1_path, img2_path, depth1_path, depth2_path))
                 idx += 1

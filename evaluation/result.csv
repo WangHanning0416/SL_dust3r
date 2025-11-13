@@ -11,4 +11,5 @@ kinectsp_encoder_crossattn（self cross fuse）,0.207,0.161,0.355,0.475,0.389,0.
 kinectsp_decoder_crossattn（fuse self cross）,0.211,0.164,0.353,0.477,0.381,0.495,0.338,0.423
 kinectsp_encoder_crossattn（fuse self cross）,0.345,0.25,0.496,0.788,0.537,0.646,0.447,0.591
 kinectsp_view2pattern,0.267,0.208,0.402,0.591,0.472,0.568,0.372,0.505
-kinectsp_view2pattern2,0.228,0.179,0.346,0.453,0.393,0.491,0.351,0.466
+kinectsp_view2pattern2,0.228,0.179,0.346,0.453,0.393,0.491,0.351,0.466,
+kinectsp_patternloss,0.382,0.261,0.406,0.545,0.464,0.479,0.373,0.457

@@ -34,6 +34,7 @@ class LinearPts3d (nn.Module):
 
         # extract 3D points
         feat = self.proj(tokens)  # B,S,D
+        
         feat = feat.transpose(-1, -2).view(B, -1, H//self.patch_size, W//self.patch_size)
         feat = F.pixel_shuffle(feat, self.patch_size)  # B,3,H,W
 
