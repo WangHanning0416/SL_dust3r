@@ -1,9 +1,4 @@
-# Copyright (C) 2024-present Naver Corporation. All rights reserved.
-# Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
-#
-# --------------------------------------------------------
-# DUSt3R model class
-# --------------------------------------------------------
+# dust3r原本的网络框架
 from copy import deepcopy
 import torch
 import os
@@ -53,6 +48,8 @@ def load_model(model_path, device, verbose=True):
     return net.to(device)
 
 
+
+
 class AsymmetricCroCo3DStereo (
     CroCoNet,
     huggingface_hub.PyTorchModelHubMixin,
@@ -82,21 +79,7 @@ class AsymmetricCroCo3DStereo (
         self.dec_blocks2 = deepcopy(self.dec_blocks)
         self.img_size = croco_kwargs.get('img_size', 224)
         self.patch_size = croco_kwargs.get('patch_size', 16)
-        self.attn_save_dir = "/data3/hanning/dust3r/cross_attn_npy"
-        self.pattern_decoder_embed = PatchEmbed_Mlp(
-            img_size=self.img_size,
-            patch_size=self.patch_size,
-            in_chans=3,
-            embed_dim=self.dec_embed_dim,  
-            flatten=True 
-        )
-        self.pattern_encoder_embed = PatchEmbed_Mlp(
-            img_size=self.img_size,
-            patch_size=self.patch_size,
-            in_chans=3,
-            embed_dim=self.enc_embed_dim,  
-            flatten=True 
-        )
+        self.attn_save_dir = "/data/hanning/dust3r/cross_attn_npy"
         self.set_downstream_head(output_mode, head_type, landscape_only, depth_mode, conf_mode, **croco_kwargs)
         self.set_freeze(freeze)
 

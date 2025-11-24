@@ -10,16 +10,19 @@ from dust3r.model import load_model
 from dust3r.utils.image import imread_cv2
 from dust3r.datasets.utils.cropping import crop_image_depthmap, rescale_image_depthmap, camera_matrix_of_crop, bbox_from_intrinsics_in_out
 from dust3r.utils.geometry import depthmap_to_absolute_camera_coordinates
-from dust3r.datasets.utils.transforms import ImgNorm  # 导入图像归一化处理
+from dust3r.datasets.utils.transforms import ImgNorm # 导入图像归一化处理
+
+from dust3r.utils.modalities import gen_sparse_depth,gen_rays,gen_rel_pose
 from evaluation.eval import evaluate_scene_data
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/nvme/data/hanning/checkpoints/dust3r_SL_224_pattern2/checkpoint-best.pth",
-    "resolution": 224,  
+    "model_weight_path": "/nvme/data/hanning/checkpoints/dust3r_kinectsp_224_inject_pose_nonorm/checkpoint-best.pth",
+    "resolution": 224, 
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
-    "base_result_dir": "/data/hanning/dust3r/result_rgb/",  # 基础结果目录
+    "base_result_dir": "/data/hanning/dust3r/result_rgb/",
+    "batch_size": 16,
 }
 
 def init_scene_dir(scene_name):
@@ -27,7 +30,6 @@ def init_scene_dir(scene_name):
     npy_dir = os.path.join(scene_dir, "npy")
     ply_dir = os.path.join(scene_dir, "ply")
     
-    # 创建目录（如果不存在）
     for dir_path in [scene_dir, npy_dir, ply_dir]:
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
@@ -37,6 +39,10 @@ def init_scene_dir(scene_name):
 
 def init_model():
     """初始化原始模型"""
+    if not os.path.exists(CONFIG["model_weight_path"]):
+        print(f"警告：模型权重文件未找到：{CONFIG['model_weight_path']}。请确保路径正确。")
+        return None
+        
     model = load_model(
         model_path=CONFIG["model_weight_path"],
         device=CONFIG["device"],
@@ -47,16 +53,30 @@ def init_model():
     return model
 
 def transpose_to_landscape(view):
-    """将视图转换为横屏格式，与数据集处理保持一致"""
+    """
+    将视图转换为横屏格式，并确保 known_depth 和 known_rays 被正确转置。
+    """
     height, width = view['true_shape']
 
     if width < height:
         view['img'] = view['img'].swapaxes(1, 2)
         view['depthmap'] = view['depthmap'].swapaxes(0, 1)
+        
+        # === 修复/新增：known_depth 和 known_rays 转置 ===
+        # known_depth 形状 (2, H, W) -> (2, W, H)，交换 H, W (索引 1, 2)
+        if 'known_depth' in view and view['known_depth'] is not None:
+            view['known_depth'] = view['known_depth'].swapaxes(1, 2)
+            
+        # known_rays 形状 (3, H, W) -> (3, W, H)，交换 H, W (索引 1, 2)
+        if 'known_rays' in view and view['known_rays'] is not None:
+            view['known_rays'] = view['known_rays'].swapaxes(1, 2)
+            
         if 'pts3d' in view:
             view['pts3d'] = view['pts3d'].swapaxes(0, 1)
         if 'valid_mask' in view:
             view['valid_mask'] = view['valid_mask'].swapaxes(0, 1)
+            
+        # 交换相机内参的 fx 和 fy
         view['camera_intrinsics'] = view['camera_intrinsics'][[1, 0, 2]]
 
 def _crop_resize_if_necessary(image, depthmap, intrinsics, resolution, rng=None):
@@ -75,39 +95,51 @@ def _crop_resize_if_necessary(image, depthmap, intrinsics, resolution, rng=None)
 
     W, H = image.size
     assert resolution[0] >= resolution[1]
+    # 使用 NumPy 数组进行分辨率比较
+    resolution_np = np.array(resolution)
+    
     if H > 1.1 * W:
-        resolution = resolution[::-1]
-    elif 0.9 < H / W < 1.1 and resolution[0] != resolution[1] and rng is not None:
+        resolution_np = resolution_np[::-1]
+    elif 0.9 < H / W < 1.1 and resolution_np[0] != resolution_np[1] and rng is not None:
         if rng.integers(2):
-            resolution = resolution[::-1]
+            resolution_np = resolution_np[::-1]
 
-    target_resolution = np.array(resolution)
+    target_resolution = resolution_np
     image, depthmap, intrinsics = rescale_image_depthmap(image, depthmap, intrinsics, target_resolution)
 
-    intrinsics2 = camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
-    crop_bbox = bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
+    intrinsics2 = camera_matrix_of_crop(intrinsics, image.size, target_resolution, offset_factor=0.5)
+    crop_bbox = bbox_from_intrinsics_in_out(intrinsics, intrinsics2, target_resolution)
     image, depthmap, intrinsics2 = crop_image_depthmap(image, depthmap, intrinsics, crop_bbox)
     
     return image, depthmap, intrinsics2
 
-def process_view(img_path, depth_path, intrinsics, resolution, rng, idx, view_idx):
+def process_view(img_path, depth_path, intrinsics, camera_pose ,resolution, rng, idx, view_idx):
+
     img = imread_cv2(img_path)
     depthmap = imread_cv2(depth_path, cv2.IMREAD_UNCHANGED)
     
+    if img is None or depthmap is None:
+        print(f"Warning: Image or depth map loading failed for {os.path.basename(img_path)}. Skipping sample.")
+        return None
+        
     depthmap = depthmap.astype(np.float32)
-    max_val = float(np.nanmax(depthmap)) if depthmap.size > 0 else 0.0
-    depthmap = depthmap / 6553.5
-
+    depthmap = depthmap / 6553.5 # 假设的归一化
     depthmap[~np.isfinite(depthmap)] = 0.0
 
+    # --- 2. 裁剪和缩放 ---
     img_pil, depthmap, intrinsics = _crop_resize_if_necessary(
         img, depthmap, intrinsics, resolution, rng=rng)
+    
+    if img_pil is None or depthmap is None:
+         print(f"Warning: Crop/Resize returned None for {os.path.basename(img_path)}. Skipping sample.")
+         return None
 
+    # --- 3. 初始化 View 字典 ---
     view = {
         'img': img_pil,
         'depthmap': depthmap.astype(np.float32),
         'camera_intrinsics': intrinsics.astype(np.float32),
-        'camera_pose': np.eye(4, dtype=np.float32),
+        'camera_pose': camera_pose.astype(np.float32),
         'dataset': 'custom',
         'label': os.path.basename(img_path),
         'instance': f'{idx}_{view_idx}',
@@ -115,102 +147,115 @@ def process_view(img_path, depth_path, intrinsics, resolution, rng, idx, view_id
 
     width, height = img_pil.size
     view['true_shape'] = np.int32((height, width))
+    valid_mask = (view['depthmap'] > 0)
+    
+    # --- 4. 新增：生成 known_rays (光线方向) ---
+    # gen_rays 返回 (3, H, W)
+    view['known_rays'] = gen_rays(view)
+    
+    # --- 5. 生成 known_depth (稀疏深度) ---
+    # gen_sparse_depth 返回 (2, H, W)
+    view['known_depth'] = gen_sparse_depth(
+        view,
+        valid_mask,
+        n_pts_min=64,
+        n_pts_max=0,
+    )
 
+    # ImgNorm 将 PIL.Image 转换为 PyTorch Tensor 并进行归一化
     view['img'] = ImgNorm(view['img'])
 
-    # 计算3D点云和有效掩码
-    pts3d, valid_mask = depthmap_to_absolute_camera_coordinates(** view)
+    # --- 6. 计算 GT 3D 点云 (pts3d) ---
+
+    pts3d, valid_mask = depthmap_to_absolute_camera_coordinates(
+        depthmap=view['depthmap'],
+        camera_intrinsics=view['camera_intrinsics'],
+        camera_pose=view['camera_pose']
+    )
     view['pts3d'] = pts3d
     view['valid_mask'] = valid_mask & np.isfinite(pts3d).all(axis=-1)
 
-    # 转换为横屏格式
+    # --- 7. 转置处理 ---
     transpose_to_landscape(view)
 
     return view
 
-def save_pts_to_ply(pts, colors, save_path):
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts)
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-    o3d.io.write_point_cloud(save_path, pcd, write_ascii=False)
-    return True
-
 def process_image_pair(model, image1_path, image2_path, depth1_path, depth2_path, 
-                       pair_idx, ply_dir, intrinsics, resolution, rng):
-    try:
-        # 处理两个视图
-        view1 = process_view(image1_path, depth1_path, intrinsics, resolution, rng, pair_idx, 0)
-        view2 = process_view(image2_path, depth2_path, intrinsics, resolution, rng, pair_idx, 1)
-        
-        # 设备和维度处理
-        view1['img'] = view1['img'].unsqueeze(0).to(CONFIG["device"])
-        view2['img'] = view2['img'].unsqueeze(0).to(CONFIG["device"])
-        view1['true_shape'] = torch.from_numpy(view1['true_shape']).unsqueeze(0).to(CONFIG["device"])
-        view2['true_shape'] = torch.from_numpy(view2['true_shape']).unsqueeze(0).to(CONFIG["device"])
-        
-        # 执行推理
-        with torch.no_grad():
-            res1, res2 = model(view1, view2)
-        
-        # 处理预测点云
-        pred_pts, pred_colors = filter_point_cloud(
-            res1["pts3d"].squeeze(0).cpu().numpy(), 
-            view1, 
-            res1
-        )
-        
-        # 处理GT点云
-        gt_pts = view1['pts3d']  # 由GT深度图计算的点云
-        gt_valid_mask = view1['valid_mask']
-        gt_pts_flat = gt_pts.reshape(-1, 3)
-        gt_valid_flat = gt_valid_mask.reshape(-1)
-        
-        pair_prefix = f"pair_{pair_idx:03d}"
-        
-        print(f"已处理图像对 {pair_idx+1}，点云数量: {pred_pts.shape[0]}")
-        return {
-            'pair_idx': pair_idx,
-            'image1_path': image1_path,
-            'image2_path': image2_path,
-            'pred_pts': pred_pts,
-            'gt_pts': gt_pts_flat,
-            'gt_valid_mask': gt_valid_flat
-        }
-        
-    except Exception as e:
-        print(f"处理图像对 {pair_idx} 时出错: {str(e)}")
-        return None
+                         pair_idx, ply_dir, intrinsics, resolution, rng):
+    print(f"警告：process_image_pair 函数未被 main 调用，并且缺少 filter_point_cloud 函数定义。")
+    return None
 
 def stack_batch_and_move_to_device(view_list, device):
-    batch = {}
-    batch['img'] = torch.stack([v['img'] for v in view_list]).to(device)
-    batch['true_shape'] = torch.stack([torch.from_numpy(v['true_shape']) for v in view_list]).to(device)
-    # batch['camera_intrinsics'] = torch.from_numpy(
-    #     np.stack([v['camera_intrinsics'] for v in view_list])
-    # ).float().to(device)
+    """
+    堆叠批次数据，确保 known_depth 和 known_rays 被正确堆叠并移动到设备。
+    """
+    valid_views = [v for v in view_list if v is not None]
+    if not valid_views:
+        return None
 
-    # batch['camera_pose'] = torch.from_numpy(
-    #     np.stack([v['camera_pose'] for v in view_list])
-    # ).float().to(device)
+    batch = {}
+    batch['img'] = torch.stack([v['img'] for v in valid_views]).to(device)
+    batch['true_shape'] = torch.stack([torch.from_numpy(v['true_shape']) for v in valid_views]).to(device)
+    
+    # === 新增：堆叠 known_rays ===
+    known_rays_list = [v.get('known_rays') for v in valid_views]
+    if all(kr is not None for kr in known_rays_list):
+        # (3, H, W) NumPy 数组 -> Tensor -> 堆叠为 (B, 3, H, W)
+        known_rays_tensors = [torch.from_numpy(kr) for kr in known_rays_list]
+        batch['known_rays'] = torch.stack(known_rays_tensors).to(device)
+    
+    # === 修复：堆叠 known_depth ===
+    known_depth_list = [v.get('known_depth') for v in valid_views]
+    if all(kd is not None for kd in known_depth_list):
+        # (2, H, W) NumPy 数组 -> Tensor -> 堆叠为 (B, 2, H, W)
+        known_depth_tensors = [torch.from_numpy(kd) for kd in known_depth_list]
+        batch['known_depth'] = torch.stack(known_depth_tensors).to(device)
+    
+    known_pose_list = [v.get('known_pose') for v in valid_views]
+    if all(kp is not None for kp in known_pose_list):
+        # (B,4,4)
+        known_pose_tensors = [torch.from_numpy(kp) for kp in known_pose_list]
+        batch['known_pose'] = torch.stack(known_pose_tensors).to(device)
+
+        
     return batch
 
-def process_batch(model, image1_batch, image2_batch, depth1_batch, depth2_batch, 
+def process_batch(model, image1_batch, image2_batch, depth1_batch, depth2_batch,
+                  camera_pose1_batch, camera_pose2_batch, 
                   batch_idx, intrinsics, resolution, rng):
-    view1_batch_list = []
-    view2_batch_list = []
+    
     batch_size = len(image1_batch)
     
     # 1. 预处理：逐个样本调用 process_view
+    view1_batch_list = []
+    view2_batch_list = []
     for i in range(batch_size):
-        # 假设 process_view 返回包含 NumPy/CPU Tensor 的 dict
-        view1 = process_view(image1_batch[i], depth1_batch[i], intrinsics, resolution, rng, batch_idx * batch_size + i, 0)
-        view2 = process_view(image2_batch[i], depth2_batch[i], intrinsics, resolution, rng, batch_idx * batch_size + i, 1)
-        view1_batch_list.append(view1)
-        view2_batch_list.append(view2)
+        # process_view 会返回 None 如果加载失败
+        view1 = process_view(image1_batch[i], depth1_batch[i], intrinsics, camera_pose1_batch[i], resolution, rng, batch_idx * batch_size + i, 0)
+        view2 = process_view(image2_batch[i], depth2_batch[i], intrinsics, camera_pose2_batch[i], resolution, rng, batch_idx * batch_size + i, 1)
+        view1["known_pose"] = gen_rel_pose([view1,view2])
+        view2["known_pose"] = gen_rel_pose([view2,view1])
+        #print("view1_pose_shape:",view1["known_pose"].shape)
 
+        # 仅将成功处理的 view 加入列表
+        if view1 is not None and view2 is not None:
+             view1_batch_list.append(view1)
+             view2_batch_list.append(view2)
+        else:
+             print(f"Skipping pair {batch_idx * batch_size + i} due to data loading/processing failure.")
+
+    # 检查是否有有效样本
+    if not view1_batch_list:
+        return None
+        
     # 2. 堆叠和推理：Batch Inference
     view1 = stack_batch_and_move_to_device(view1_batch_list, CONFIG["device"])
     view2 = stack_batch_and_move_to_device(view2_batch_list, CONFIG["device"])
+
+    # 如果堆叠后的批次为空 (即所有有效样本都被过滤)，则返回 None
+    if view1 is None or view2 is None:
+        return None
+        
     # 假设 'instance' 是 Batch 维度的元数据，需要保持列表形式
     view1['instance'] = [v['instance'] for v in view1_batch_list]
     view2['instance'] = [v['instance'] for v in view2_batch_list]
@@ -225,96 +270,104 @@ def process_batch(model, image1_batch, image2_batch, depth1_batch, depth2_batch,
     colors_np = img_tensor_cpu.permute(0, 2, 3, 1).numpy()
     colors_np = (colors_np * 0.5 + 0.5).clip(0, 1) 
     
-    # 置信度 (B, 1, H, W) -> (B, H, W)
-    conf_np = res1_batch["conf"].cpu().numpy()
+    # 信心度处理
+    conf_tensor = res1_batch["conf"].cpu()
+    
+    if conf_tensor.dim() == 4 and conf_tensor.shape[1] == 1:
+        conf_np = conf_tensor.squeeze(1).numpy() # 结果为 (B, H, W)
+    elif conf_tensor.dim() == 3:
+        conf_np = conf_tensor.numpy()
+    else:
+        conf_np = conf_tensor.numpy()
+        if conf_np.ndim == 4:
+            conf_np = conf_np[:, 0, :, :]
 
+    # GT 数据准备
     gt_pts3d_batch = np.stack([v['pts3d'] for v in view1_batch_list]) # (B, H, W, 3) NumPy
     gt_valid_mask_batch = np.stack([v['valid_mask'] for v in view1_batch_list]) # (B, H, W) NumPy
-
+    gt_depth_map_batch = np.stack([v['depthmap'] for v in view1_batch_list]) # (B, H, W) NumPy
+    
     batch_pred_pts_flat = []
     batch_pred_colors_flat = []
     batch_pred_conf_flat = []
     batch_gt_pts_flat = []
     batch_gt_valid_flat = []
+    batch_gt_depth_flat = []
     
-    for i in range(batch_size):
-        # 预测结果展平 (H*W, 3)
+    valid_batch_size = len(view1_batch_list)
+    
+    for i in range(valid_batch_size):
+        # 预测结果展平
         batch_pred_pts_flat.append(pred_pts3d_np[i].reshape(-1, 3))
         batch_pred_colors_flat.append(colors_np[i].reshape(-1, 3))
         
-        if conf_np is not None:
-            batch_pred_conf_flat.append(conf_np[i].reshape(-1)) # (H*W,)
+        if conf_np is not None and conf_np.ndim > 1:
+            batch_pred_conf_flat.append(conf_np[i].reshape(-1)) 
 
         # GT 结果展平
         batch_gt_pts_flat.append(gt_pts3d_batch[i].reshape(-1, 3))
-        batch_gt_valid_flat.append(gt_valid_mask_batch[i].reshape(-1)) # (H*W,)
+        batch_gt_valid_flat.append(gt_valid_mask_batch[i].reshape(-1))
+        batch_gt_depth_flat.append(gt_depth_map_batch[i].reshape(-1))
         
-    H, W = pred_pts3d_np.shape[1:3]
-    #print(f"Batch {batch_idx + 1} 已处理 {batch_size} 个图像对，每个点云形状为 ({H*W}, 3)")
-
     return {
         'batch_idx': batch_idx,
-        'image1_paths': image1_batch,
-        'image2_paths': image2_batch,
-        'pred_pts_list': batch_pred_pts_flat,         # List of (H*W, 3)
-        'pred_colors_list': batch_pred_colors_flat,   # List of (H*W, 3)
-        'pred_conf_list': batch_pred_conf_flat,       # List of (H*W,) (如果有)
-        'gt_pts_list': batch_gt_pts_flat,             # List of (H*W, 3)
-        'gt_valid_mask_list': batch_gt_valid_flat     # List of (H*W,)
+        # 使用处理后的路径列表，防止长度不匹配
+        'image1_paths': [p['label'] for p in view1_batch_list],
+        'image2_paths': [p['label'] for p in view2_batch_list],
+        'pred_pts_list': batch_pred_pts_flat,
+        'pred_colors_list': batch_pred_colors_flat, 
+        'pred_conf_list': batch_pred_conf_flat,
+        'gt_pts_list': batch_gt_pts_flat, 
+        'gt_valid_mask_list': batch_gt_valid_flat, 
+        'gt_depth_list': batch_gt_depth_flat 
     }
-
+    
 def process_scene(model, scene_name, image_pairs, intrinsics):
     scene_dir, npy_dir, ply_dir = init_scene_dir(scene_name) 
 
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
+    rng = np.random.default_rng(seed=42)
     
     resolution = (CONFIG["resolution"], CONFIG["resolution"])
-    rng = np.random.default_rng(seed=42)
-    device = CONFIG["device"]
     batch_size = CONFIG.get("batch_size", 16) 
     
-    scene_results = []
-    all_pred_pts_list = []      
+    all_pred_pts_list = []
     all_pred_colors_list = []
-    all_pred_conf_list = []   
-    all_gt_pts_list = []        
+    all_pred_conf_list = []
+    all_gt_pts_list = [] 
     all_gt_valid_masks_list = []
+    all_gt_depth_list = []
     
     num_pairs = len(image_pairs)
     num_batches = (num_pairs + batch_size - 1) // batch_size
-    
-    # 核心修改：使用 tqdm 包装 Batch 循环
+
     batch_indices = range(0, num_pairs, batch_size)
     
     for batch_idx_start in tqdm(
         batch_indices, 
-        total=num_batches,  #num_batches
+        total=num_batches, 
         desc=f"Processing Scene: {scene_name}",
         unit="batch"
     ):
-        # 1. 确定当前 Batch 的范围和数据
         start_idx = batch_idx_start
         end_idx = min(batch_idx_start + batch_size, num_pairs)
         current_pairs = image_pairs[start_idx:end_idx]
         
-        # 解包 Batch 数据
         img1_batch = [p[0] for p in current_pairs]
         img2_batch = [p[1] for p in current_pairs]
         depth1_batch = [p[2] for p in current_pairs]
         depth2_batch = [p[3] for p in current_pairs]
+        camera_pose1_batch = [p[4] for p in current_pairs]
+        camera_pose2_batch = [p[5] for p in current_pairs]
         
-        # 2. 调用 Batch 处理函数
         batch_results = process_batch(
             model=model, 
             image1_batch=img1_batch, 
             image2_batch=img2_batch, 
             depth1_batch=depth1_batch, 
             depth2_batch=depth2_batch,
-            batch_idx=batch_idx_start // batch_size, # 传递 Batch 索引
+            camera_pose1_batch = camera_pose1_batch,
+            camera_pose2_batch = camera_pose2_batch,
+            batch_idx=batch_idx_start // batch_size,
             intrinsics=intrinsics, 
             resolution=resolution, 
             rng=rng,
@@ -325,9 +378,17 @@ def process_scene(model, scene_name, image_pairs, intrinsics):
             all_pred_colors_list.extend(batch_results['pred_colors_list'])
             all_gt_pts_list.extend(batch_results['gt_pts_list'])
             all_gt_valid_masks_list.extend(batch_results['gt_valid_mask_list'])
+            all_gt_depth_list.extend(batch_results['gt_depth_list'])
             
             if 'pred_conf_list' in batch_results and batch_results['pred_conf_list']:
                 all_pred_conf_list.extend(batch_results['pred_conf_list'])
+
+    if all_gt_depth_list:
+        print(f"\n场景 {scene_name} 的 {len(all_gt_depth_list)} 个真实深度图已已经过评估")
+
+    if not all_pred_pts_list:
+        print(f"\n场景 {scene_name} 没有有效图像对被处理，跳过评估和结果保存。")
+        return
 
     scene_name,loss = evaluate_scene_data(
         scene_name=scene_name,
@@ -337,38 +398,56 @@ def process_scene(model, scene_name, image_pairs, intrinsics):
     )
 
     summary_path = "/data/hanning/SL_dust3r/evaluation/result.csv"
-    with open(summary_path, 'a') as f:
-        f.write(f",{loss}")
+    try:
+        if not os.path.exists(os.path.dirname(summary_path)):
+             os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+             
+        with open(summary_path, 'a') as f:
+            f.write(f",{loss}")
+    except Exception as e:
+        print(f"写入评估总结文件出错: {e}")
+
 
     print(f"\n场景 {scene_name} 处理完成，共 {len(all_pred_pts_list)} 个图像对结果已保存。")
 
 def main():
-    # 假设 init_model 已定义
     model = init_model()
+    if model is None:
+        print("模型初始化失败，退出。")
+        return
+        
     intrinsics = np.array([[600.0, 0, 599.5],
                            [0, 600.0, 399.5],
                            [0, 0, 1]], dtype=np.float32)
     
-    # 初始化随机种子（全局只需要设置一次）
     random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
     
+    
     scenes = ["office0", "office1", "office2", "office3", "office4", "room0", "room1", "room2"]
     for scene_name in scenes:
+        traj = []
+        traj_base_path = "/data/hanning/SLAM3R/data/Replica"
+        traj_path = os.path.join(traj_base_path,scene_name,"traj.txt")
+        traj = np.loadtxt(traj_path).reshape(-1,4,4)
+        print("traj shape:",traj.shape)
+
         image_pairs = []
         idx = 0
         while True:
-            img1_path = f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx:06d}.jpg"
-            img2_path = f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/frame{idx+10:06d}.jpg"
-            depth1_path = f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/depth{idx:06d}.png"
-            depth2_path =  f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results/depth{idx+10:06d}.png"
+            base_dir = f"/nvme/data/hanning/datasets/Replica_kinectsp/{scene_name}/results"
+            img1_path = os.path.join(base_dir, f"frame{idx:06d}.jpg")
+            img2_path = os.path.join(base_dir, f"frame{idx+10:06d}.jpg")
+            depth1_path = os.path.join(base_dir, f"depth{idx:06d}.png")
+            depth2_path = os.path.join(base_dir, f"depth{idx+10:06d}.png")
             
-
             if all(os.path.exists(p) for p in [img1_path, img2_path, depth1_path, depth2_path]):
-                image_pairs.append((img1_path, img2_path, depth1_path, depth2_path))
+                camera_pose1 = traj[idx]
+                camera_pose2 = traj[idx+10] 
+                image_pairs.append((img1_path, img2_path, depth1_path, depth2_path, camera_pose1, camera_pose2))
                 idx += 1
             else:
                 break

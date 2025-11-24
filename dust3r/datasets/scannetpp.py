@@ -13,58 +13,42 @@ import numpy as np
 import json
 
 from dust3r.datasets.base.base_stereo_view_dataset import BaseStereoViewDataset
+from dust3r.utils.image import imread_cv2
+from dust3r.utils.modalities import gen_sparse_depth,gen_rays,gen_rel_pose
 from dust3r.datasets.base.pattern_synth import PatternSynthMixin
-from dust3r.utils.image import imread_cv2, imread_iio
 
-
-class ScanNetpp(BaseStereoViewDataset, PatternSynthMixin):
-    def __init__(self, *args, split='train', ROOT, pattern_config=None, pattern_split=None, **kwargs):
-        '''subtrain, subval: subval的场景比例是0.05, 大约42个.'''
+class ScanNetpp(BaseStereoViewDataset):
+    def __init__(self, *args, split='train', ROOT, **kwargs):
         self.ROOT = ROOT
-        assert split in ['train', 'subtrain', 'subval', 'test'] 
-
-        self.pattern_config = pattern_config
-        self.pattern_split = pattern_split
+        self.metadata_ROOT = "/nvme/data/hanning/datasets/Scannetpp/scannetpp_processed" 
+        self.SL_ROOT = "/nvme/data/hanning/datasets/Scannetpp/scannetpp_SL"
+        self.split_file = osp.join(self.metadata_ROOT, 'train_test_split.json')
+        assert osp.exists(self.split_file), f"non exist: {self.split_file}"
+        
+        with open(self.split_file, 'r') as f:
+            split_data = json.load(f)
+        self.train_scenes = split_data['train']
+        self.test_scenes = split_data['test']
         
         super().__init__(*args, **kwargs)
-        assert self.num_views <= 2, "only support num_views in [1,2] now."
         self.split = split
-        self.subval_ratio = 0.05
-        
-        if split == 'test':
-            self.split = 'subval' # 在 _load_data 中将其映射到 subval 场景分割逻辑
-        
-        self._load_data()
-        
-        if self.pattern_config is not None:
-            # 自动推断 pattern_split 的合理默认值
-            if self.pattern_split is None:
-                default_pattern_split = 'train' if split in ['train', 'subtrain'] else 'test'
-                self.pattern_split = default_pattern_split
-                print(f"[ScanNetpp] 自动推断 pattern_split 为: '{self.pattern_split}' (基于数据集 split='{split}')")
-            
-            print(f"[ScanNetpp] 激活结构光合成. Config: {self.pattern_config}, Split: {self.pattern_split}")
-            # 调用继承自 PatternSynthMixin 的方法，立即激活功能
-            self.initialize_pattern_config(self.pattern_config, self.pattern_split)
+        self.loaded_data = self._load_data()
 
     def _load_data(self):
-        with np.load("/nvme/data/hanning/datasets/Scannetpp/scannetpp_processed/all_metadata.npz") as data:
+        with np.load(osp.join(self.metadata_ROOT, 'all_metadata.npz')) as data:
             self.scenes = data['scenes']
             self.sceneids = data['sceneids']
             self.images = data['images']
             self.intrinsics = data['intrinsics'].astype(np.float32)
             self.trajectories = data['trajectories'].astype(np.float32)
-            self.pairs = data['pairs'][:, :2].astype(int)
-        
+            all_pairs = data['pairs'][:, :2].astype(int)
+        print("-----------",self.split,"------------")
         if self.split == 'train':
-            return   # 所有都拿来训练，直接返回.
-        
-        # subval or subtrain.
-        subval_num = int(len(self.scenes) * self.subval_ratio)
-        if self.split == 'subtrain':
-            selected_scenes = self.scenes[:-subval_num]
-        else: # split == 'subval' (也包括我们映射的 'test' split)
-            selected_scenes = self.scenes[-subval_num:]
+            selected_scenes = set(self.train_scenes)
+        elif self.split == 'test':
+            selected_scenes = set(self.test_scenes)
+        else:
+            raise ValueError(f"unsupported: {self.split}, valuable: 'train', 'test'")
 
         selected_image_indices = []
         for i, scene_id in enumerate(self.sceneids):
@@ -74,7 +58,7 @@ class ScanNetpp(BaseStereoViewDataset, PatternSynthMixin):
         selected_image_set = set(selected_image_indices)
 
         valid_pairs = []
-        for pair in self.pairs.tolist():
+        for pair in all_pairs:
             if pair[0] in selected_image_set and pair[1] in selected_image_set:
                 valid_pairs.append(pair)
         
@@ -88,40 +72,48 @@ class ScanNetpp(BaseStereoViewDataset, PatternSynthMixin):
         image_idx1, image_idx2 = self.pairs[idx]
 
         views = []
-        for view_idx in [image_idx1, image_idx2] if self.num_views == 2 else [image_idx1]:
+        for view_idx in [image_idx1, image_idx2]:
             scene_id = self.sceneids[view_idx]
             scene_dir = osp.join(self.ROOT, self.scenes[scene_id])
 
             intrinsics = self.intrinsics[view_idx]
             camera_pose = self.trajectories[view_idx]
             basename = self.images[view_idx]
-
-            # 读取原始 RGB 图像 (会被 PatternSynthMixin 替换)
-            rgb_image = imread_iio(osp.join(self.ROOT,self.scenes[scene_id], 'images', basename + '.jpg'))  
-            depthmap = imread_iio(osp.join(scene_dir, 'depth', basename + '.png'), cv2.IMREAD_UNCHANGED)
+           
+            rgb_image = imread_cv2(osp.join(self.SL_ROOT,self.scenes[scene_id], basename + '.jpg'))
+            depthmap = imread_cv2(osp.join(scene_dir, 'depth', basename + '.png'), cv2.IMREAD_UNCHANGED)
             depthmap = depthmap.astype(np.float32) / 1000
             depthmap[~np.isfinite(depthmap)] = 0
 
             rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
                 rgb_image, depthmap, intrinsics, resolution, rng=rng, info=view_idx)
-            
-            views.append(dict(
+
+            view_dict = dict(
                 img=rgb_image,
                 depthmap=depthmap.astype(np.float32),
                 camera_pose=camera_pose.astype(np.float32),
                 camera_intrinsics=intrinsics.astype(np.float32),
                 dataset='ScanNet++',
-                label=self.scenes[scene_id] + '|' + basename,
+                label=self.scenes[scene_id] + '_' + basename,
                 instance=f'{str(idx)}_{str(view_idx)}',
-            ))
+            )
+            valid_mask = (depthmap > 0)
+            view_dict['known_depth'] = gen_sparse_depth(
+                view_dict,
+                valid_mask,
+                n_pts_min=64,
+                n_pts_max=0,
+            )
+            view_dict['known_rays'] = gen_rays(view_dict)
+            views.append(view_dict)
+        views[0]['known_pose'] = gen_rel_pose(views)
+        views[1]['known_pose'] = gen_rel_pose([views[1],views[0]])
         return views
-
 
 if __name__ == "__main__":
     from dust3r.datasets.base.base_stereo_view_dataset import view_name
     from dust3r.viz import SceneViz, auto_cam_size
     from dust3r.utils.image import rgb
-    pattern_config = "/data/hanning/dust3r/configs/pattern_config.yaml"
 
     train_dataset = ScanNetpp(
         split='train', 
@@ -130,14 +122,18 @@ if __name__ == "__main__":
         aug_crop=16
     )
 
-    train_dataset.initialize_pattern_config(pattern_config, split='train')
-
     for idx in np.random.permutation(min(5, len(train_dataset))):
         views = train_dataset[idx]
         assert len(views) == 2
         print(f"train {idx}: {view_name(views[0])}, {view_name(views[1])}")
         
-        valid = views[0]['pattern_valid_mask'] 
-        true_count = np.sum(valid)
-        print(f"pattern valid count: {true_count} / {valid.size}" )
-        
+        viz = SceneViz()
+        poses = [views[view_idx]['camera_pose'] for view_idx in [0, 1]]
+        cam_size = max(auto_cam_size(poses), 0.001)
+        print("known_depth:",views[0]['known_depth'])
+        print("camera:",views[0]['camera_intrinsics'])
+        print("known_rays",views[0]['known_rays'])
+        print("known_pose1",views[0]['known_pose'])
+        print("known_pose2",views[1]['known_pose'])
+        print(views[0]['known_pose'] @ views[1]['known_pose'])
+           

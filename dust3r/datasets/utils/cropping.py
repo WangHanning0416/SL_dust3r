@@ -10,6 +10,8 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2  # noqa
 import numpy as np  # noqa
 from dust3r.utils.geometry import colmap_to_opencv_intrinsics, opencv_to_colmap_intrinsics  # noqa
+import torch
+import torch.nn.functional as F
 try:
     lanczos = PIL.Image.Resampling.LANCZOS
     bicubic = PIL.Image.Resampling.BICUBIC
@@ -66,7 +68,7 @@ def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution
 
     # define output resolution
     assert output_resolution.shape == (2,)
-    scale_final = max(output_resolution / image.size) + 1e-8
+    scale_final = max(output_resolution / image.size) + 1e-8  # 无法保证 out_image.size == output_resolution
     if scale_final >= 1 and not force:  # image is already smaller than what is asked
         return (image.to_pil(), depthmap, camera_intrinsics)
     output_resolution = np.floor(input_resolution * scale_final).astype(int)
@@ -122,3 +124,23 @@ def bbox_from_intrinsics_in_out(input_camera_matrix, output_camera_matrix, outpu
     l, t = np.int32(np.round(input_camera_matrix[:2, 2] - output_camera_matrix[:2, 2]))
     crop_bbox = (l, t, l + out_width, t + out_height)
     return crop_bbox
+
+
+def resize_crop_img_tensor(img:torch.Tensor, new_size:tuple):
+    '''simplified resize+crop.  
+       img:torch.Tensor, (B)CHW. new_size: (h, w)'''
+    unbatched = False
+    if img.ndim == 3:
+        img = img.unsqueeze(0)
+        unbatched = True
+    ih, iw = img.shape[-2:]
+    th, tw = new_size
+    scale_factor = max(th / ih, tw / iw)
+    # resize (keep aspect-ratio)
+    img = F.interpolate(img, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+    # crop
+    _h, _w = img.shape[-2:]
+    _w_left = int(_w / 2 - tw / 2)
+    _h_top = int(_h / 2 - th / 2)
+    img = img[..., _h_top : _h_top + th, _w_left : _w_left + tw]
+    return img.squeeze(0) if unbatched else img

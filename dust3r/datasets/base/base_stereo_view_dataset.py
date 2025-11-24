@@ -31,9 +31,13 @@ class BaseStereoViewDataset (EasyDataset):
                  resolution=None,  # square_size or (width, height) or list of [(width,height), ...]
                  transform=ImgNorm,
                  aug_crop=False,
-                 seed=None):
+                 seed=None,
+                 num_views = 2,
+                 cross_view_invariant = False):
+        '''cross_view_invariant 对每个视角的图像做一样的resize, crop。如果原本多视角图片的内参一致，resize, crop后内参也一致.'''
         self.num_views = 2
         self.split = split
+        self.num_views = num_views
         self._set_resolutions(resolution)
 
         if isinstance(transform, str):
@@ -42,6 +46,14 @@ class BaseStereoViewDataset (EasyDataset):
 
         self.aug_crop = aug_crop
         self.seed = seed
+
+        # cross_view_invariant
+        self._toggle_cross_view_invariant(cross_view_invariant)
+
+    def _toggle_cross_view_invariant(self, enable):
+        self.cross_view_invariant = enable
+        if self.cross_view_invariant:
+            self._cur_aug_crop_value = -1
 
     def __len__(self):
         return len(self.scenes)
@@ -74,6 +86,9 @@ class BaseStereoViewDataset (EasyDataset):
         elif not hasattr(self, '_rng'):
             seed = torch.initial_seed()  # this is different for each dataloader process
             self._rng = np.random.default_rng(seed=seed)
+
+        if self.cross_view_invariant:
+            self._cur_aug_crop_value = self._rng.integers(0, self.aug_crop) if self.aug_crop > 1 else 0
 
         # over-loaded code
         resolution = self._resolutions[ar_idx]  # DO NOT CHANGE THIS (compatible with BatchedRandomSampler)
@@ -138,12 +153,15 @@ class BaseStereoViewDataset (EasyDataset):
         """ This function:
             - first downsizes the image with LANCZOS inteprolation,
               which is better than bilinear interpolation in
+            当aug_crop>1的时候，会resize到一个稍大的分辨率然后再crop，aug_crop_num用于控制多视角间resize一致
+            这样如果多视角原本的内参相同，则处理后的内参也想通，满足“同一个相机”假设.
         """
         if not isinstance(image, PIL.Image.Image):
             image = PIL.Image.fromarray(image)
 
         # downscale with lanczos interpolation so that image.size == resolution
         # cropping centered on the principal point
+        # 先把中心点取整，这里用的是crop，只会去掉一点点边角料...
         W, H = image.size
         cx, cy = intrinsics[:2, 2].round().astype(int)
         min_margin_x = min(cx, W - cx)
@@ -158,7 +176,7 @@ class BaseStereoViewDataset (EasyDataset):
 
         # transpose the resolution if necessary
         W, H = image.size  # new size
-        assert resolution[0] >= resolution[1]
+        assert resolution[0] >= resolution[1]  # resolution一定是先大后小，而非H,W或者W,H，要根据图片的长宽比来决定，很奇怪
         if H > 1.1 * W:
             # image is portrait mode
             resolution = resolution[::-1]
@@ -168,12 +186,15 @@ class BaseStereoViewDataset (EasyDataset):
                 resolution = resolution[::-1]
 
         # high-quality Lanczos down-scaling
+        # 对图片，深度图和intrinsics进行resize，注意resize会保证长宽比，不能保证输出一定和指定的resolution相同，所以最后可能还需要crop；此外，还可以用self.aug_crop进行数据增强
+        # resize的时候随机取大一点，最后再crop
         target_resolution = np.array(resolution)
         if self.aug_crop > 1:
-            target_resolution += rng.integers(0, self.aug_crop)
+            target_resolution += (rng.integers(0, self.aug_crop) if not self.cross_view_invariant else self._cur_aug_crop_value)
         image, depthmap, intrinsics = cropping.rescale_image_depthmap(image, depthmap, intrinsics, target_resolution)
 
         # actual cropping (if necessary) with bilinear interpolation
+        # 当resize之后，图片可能会比指定的resolution大一点点，这时候需要crop, offset_factor其实是限制中心点的一定，为0.5表示在以原中心点为中心进行crop
         intrinsics2 = cropping.camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
         crop_bbox = cropping.bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
         image, depthmap, intrinsics2 = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox)

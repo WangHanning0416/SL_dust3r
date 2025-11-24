@@ -1,0 +1,43 @@
+pattern_paths: [
+  /data/hanning/SL_dust3r/patterns/alacarte.png,
+  /data/hanning/SL_dust3r/patterns/alacarteroll.png,
+  /data/hanning/SL_dust3r/patterns/D415.png,
+  /data/hanning/SL_dust3r/patterns/D435.png,
+  /data/hanning/SL_dust3r/patterns/snowleopard.png,
+  /data/hanning/SL_dust3r/patterns/sincos.png,
+  /data/hanning/SL_dust3r/patterns/kinectsp.png,
+  /data/hanning/SL_dust3r/patterns/randsquare.png
+]
+
+train:
+  pattern_idx: 6
+  fov: [-10, 10]  # 按照相机的fov来加偏移.
+  x_rot: [-10, 10]  # 俯仰角
+  y_rot: [-10, 10]  # 
+  z_rot: [-5, 5]    # 横滚
+  x_transl_sign: ['int', 0, 1]  # 0负1正
+  x_transl_abs: [0.03, 0.15]  # x baseline, preventing it to be 0.
+  y_transl: [-0.05, 0.05]
+  z_transl: [-0.05, 0.05]
+  gamma: 1
+  alpha: [0.8, 1.08]
+  beta: [1, 2]
+  noise_scale: 0  # 先不加.
+
+
+
+test:
+  # 也许可以固定视角...?
+  pattern_idx: 6  # kinectsp
+  fov: 5  # 按照相机的fov来加偏移.
+  x_rot: 2  # 模拟一点小偏差..
+  y_rot: -4  # 
+  z_rot: 2    # 横滚
+  x_transl_sign: 1  # 0负1正, 正表示投影仪在相机左边
+  x_transl_abs: 0.08  # x baseline, preventing it to be 0.
+  y_transl: 0.02  # 投影仪高点.
+  z_transl: -0.02 # 投影仪靠后点
+  gamma: 1
+  alpha: 1
+  beta: 1.5
+  noise_scale: 0  # 先不加.

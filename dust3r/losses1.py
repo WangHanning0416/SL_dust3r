@@ -1,9 +1,4 @@
-# Copyright (C) 2024-present Naver Corporation. All rights reserved.
-# Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
-#
-# --------------------------------------------------------
-# Implementation of DUSt3R training losses
-# --------------------------------------------------------
+## 原版的loss
 from copy import copy, deepcopy
 import torch
 import torch.nn as nn
@@ -246,13 +241,11 @@ class Regr3D_ShiftInv (Regr3D):
         gt_pts1, gt_pts2, pred_pts1, pred_pts2, mask1, mask2, monitoring = \
             super().get_all_pts3d(gt1, gt2, pred1, pred2)
 
-        # compute median depth
         gt_z1, gt_z2 = gt_pts1[..., 2], gt_pts2[..., 2]
         pred_z1, pred_z2 = pred_pts1[..., 2], pred_pts2[..., 2]
         gt_shift_z = get_joint_pointcloud_depth(gt_z1, gt_z2, mask1, mask2)[:, None, None]
         pred_shift_z = get_joint_pointcloud_depth(pred_z1, pred_z2, mask1, mask2)[:, None, None]
 
-        # subtract the median depth
         gt_z1 -= gt_shift_z
         gt_z2 -= gt_shift_z
         pred_z1 -= pred_shift_z

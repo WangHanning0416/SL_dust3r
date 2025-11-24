@@ -1,9 +1,5 @@
-# Copyright (C) 2024-present Naver Corporation. All rights reserved.
-# Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
-#
-# --------------------------------------------------------
-# DUSt3R model class
-# --------------------------------------------------------
+# view2 换成 pattern 且相应修改pattern路的网络架构和loss
+
 from copy import deepcopy
 import torch
 import os
@@ -187,9 +183,9 @@ class AsymmetricCroCo3DStereo (
         return head(decout, img_shape)
 
     def forward(self, view1, view2):
-        # print(view1['img'].shape)
+
         B = view1['img'].shape[0]
-        pattern_path = "/data/hanning/dust3r1/datasets/patterns/kinectsp_crop.png"
+        pattern_path = "/data/hanning/SL_dust3r/tools/kinectsp_crop.png"
         pattern = cv2.imread(pattern_path)
         device = view1['img'].device
         pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0

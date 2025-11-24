@@ -6,11 +6,12 @@
 # --------------------------------------------------------
 import torch
 import numpy as np
+from typing import Union
+from scipy.spatial.transform import Rotation as R
 from scipy.spatial import cKDTree as KDTree
 
 from dust3r.utils.misc import invalid_to_zeros, invalid_to_nans
 from dust3r.utils.device import to_numpy
-
 
 def xy_grid(W, H, device=None, origin=(0, 0), unsqueeze=None, cat_dim=-1, homogeneous=False, **arange_kw):
     """ Output a (H,W,2) array of int32 
@@ -35,6 +36,142 @@ def xy_grid(W, H, device=None, origin=(0, 0), unsqueeze=None, cat_dim=-1, homoge
     if cat_dim is not None:
         grid = stack(grid, cat_dim)
     return grid
+
+
+def intrinsics_from_fov(fov, image_size) -> torch.Tensor:
+    """ Compute camera intrinsics from field of view and image size.
+
+    fov: field of view in degree
+    image_size: (height, width) tuple
+
+    Returns a 3x3 camera intrinsics matrix.
+    """
+    H, W = image_size
+    focal_length = 0.5 * W / np.tan(0.5 * np.deg2rad(fov))
+    K = np.array([[focal_length, 0, W / 2],
+                  [0, focal_length, H / 2],
+                  [0, 0, 1]], dtype=np.float32)
+    return torch.from_numpy(K)
+
+
+def fov_from_intrinsics(intri, img_size=None):
+    cx = intri[0, 2]
+    fx = intri[0, 0] if intri[0,0] > 0 else intri[0,1]  # 可能是把一个竖向的图片打横了，变成 [0, fx, cx], [fy,0,cy]
+    if isinstance(intri, torch.Tensor):
+        cx = cx.item()
+        fx = fx.item()
+    if img_size is not None:
+        w = img_size[-1]
+    else:
+        w = cx * 2
+    fov = np.rad2deg(np.arctan(0.5 * w / fx) * 2)
+    return float(fov)
+
+def extrinsics_from_RT(R: torch.Tensor, T: torch.Tensor) -> torch.Tensor:
+    """ Build a 4x4 extrinsics matrix from rotation and translation.
+
+    R: 3x3 rotation matrix
+    T: 3x1 translation vector
+
+    Returns a 4x4 extrinsics matrix.
+    """
+    extrinsics = torch.eye(4, dtype=R.dtype, device=R.device)
+    extrinsics[:3, :3] = R
+    extrinsics[:3, 3] = T.squeeze()
+    return extrinsics
+
+def extrinsics_from_euler_transl(x_rot, y_rot, z_rot, x_transl, y_transl, z_transl, degree=True, order='xyz'):
+    R = rotation_matrix_from_euler(x_rot, y_rot, z_rot, degrees=degree, order=order)
+    T = torch.tensor([x_transl, y_transl, z_transl], dtype=torch.float32)
+    return extrinsics_from_RT(R, T)
+
+
+def rotation_matrix_from_euler(x, y, z, degrees: bool = False, order='xyz') -> torch.Tensor:
+    """ Convert Euler angles to a rotation matrix.
+
+    x, y, z: rotation angles around the x, y, z axes
+    degrees: whether the input angles are in degrees
+    order: order of rotations, e.g., 'xyz', 'zyx', etc.
+
+    Returns a 3x3 rotation matrix.
+    """
+    if degrees:
+        r = R.from_euler(order, [x, y, z], degrees=True)
+    else:
+        r = R.from_euler(order, [x, y, z], degrees=False)
+    R_mat = r.as_matrix()
+    return torch.from_numpy(R_mat).to(dtype=torch.float32)
+
+
+def warp_coord(grid: Union[tuple, torch.Tensor], z: torch.Tensor, 
+                         Ksource:torch.Tensor, Ktarget:torch.Tensor, 
+                         Trf:torch.Tensor,
+                         target_size:list = None,
+                         normalize_type:str = None):
+    """ Apply a warp operation to a pixel grid.
+        **z must be batched. its 1st dim should be batch_dim
+
+    grid: tuple: (H, W) or tensor (...,2) or (...,3)
+    Ksource: 3x3 source camera intrinsics. pixel unit.
+    Ktarget: 3x3 target camera intrinsics
+    Trf: 4x4, 3x4 or 3x3 (rotation only) matrix transforming points from source to target camera coordinates
+    z: (..., 1) or (...,) ;  if grid is a tuple, z must be (..., H, W). If Trf is rotation-only, z can be ones.
+    
+    normalize_type: [None, 'none', 'grid_sample']
+    target_size: (H, W)
+
+    Returns an array of projected 2d points (B,H,W,2) and tranformed new z (B,H,W,1).  
+    """
+    def reshape_matrix(mat:torch.Tensor, grid_shape:tuple, num_base_dim=2):  # grid_shape: (b, ..., 3) target: (b, ..., nh, nw)
+        if mat.ndim == num_base_dim:
+            return mat  # automatically broadcast.
+        assert mat.ndim == 3 and mat.shape[0] == grid_shape[0]
+        fill = len(grid_shape) - 2
+        new_shape = (mat.shape[0], ) + (1, )*fill + mat.shape[-num_base_dim:]
+        return mat.reshape(new_shape)
+
+    b = z.shape[0]
+    if isinstance(grid, tuple):
+        H, W = grid
+        grid = xy_grid(W, H, z.device if hasattr(z, 'device') else None).to(z.dtype)  # (H, W, 2)
+    else:
+        assert grid.shape[-1] in [2,3] and grid.shape[0] == b, "tensor grid must be batched and match the batch_num of z."
+    if grid.shape[-1] == 2:  # homogeneous coords not given
+        ones = torch.ones((*grid.shape[:-1], 1), dtype=grid.dtype, device=grid.device)
+        grid = torch.concat((grid, ones), dim=-1)  # (..., 3)
+
+    if z.shape[-1] != 1:
+        z = z.unsqueeze(-1)
+    
+    Ksource_inv = torch.linalg.inv(Ksource)
+    coord = torch.einsum('...ij, ...j -> ...i', reshape_matrix(Ksource_inv, grid.shape), grid) * z  # (..., 3)
+    Trf = reshape_matrix(Trf, grid.shape)
+    if Trf.shape[-1] == 4:
+        R, T = Trf[..., :3, :3], Trf[..., :3, 3]
+    else:
+        assert Trf.shape[-2:] == (3,3)
+        R = Trf
+        T = 0.
+    coord = torch.einsum('...ij, ...j -> ...i', R, coord) + T  # (..., 3)
+    new_z = coord[..., 2:3]
+    coord = torch.einsum('...ij, ...j -> ...i', reshape_matrix(Ktarget, coord.shape), coord)  # (..., 3)
+    coord = coord[..., :2] / coord[..., 2:3]  # (..., 2)
+
+    if normalize_type is None or normalize_type.lower() == 'none':
+        return coord, new_z
+    
+    if target_size is None:
+        target_size = Ktarget[..., :2, -1] * 2  # (b,) 2. [w, h]
+    else:
+        target_size = torch.tensor(target_size, dtype=coord.dtype, device=coord.device).flip(dims=(-1,)) # flip last dim. now (w,h)
+    
+    if normalize_type == 'grid_sample':
+        coord = coord / reshape_matrix(target_size, coord.shape, num_base_dim=1) * 2 - 1
+    else:
+        raise NotImplementedError
+
+    return coord, new_z
+
 
 
 def geotrf(Trf, pts, ncol=None, norm=False):
@@ -125,7 +262,6 @@ def depthmap_to_pts3d(depth, pseudo_focal, pp=None, **_):
     else:
         B, H, W = depth.shape
         n = None
-
     if len(pseudo_focal.shape) == 3:  # [B,H,W]
         pseudo_focalx = pseudo_focaly = pseudo_focal
     elif len(pseudo_focal.shape) == 4:  # [B,2,H,W] or [B,1,H,W]
@@ -134,12 +270,16 @@ def depthmap_to_pts3d(depth, pseudo_focal, pp=None, **_):
             pseudo_focaly = pseudo_focal[:, 1]
         else:
             pseudo_focaly = pseudo_focalx
+    if pseudo_focal.ndim == 1: # [B,]
+        pseudo_focalx = pseudo_focal[:, None, None]
+        pseudo_focaly = pseudo_focal[:, None, None]  # [B,1,1]
     else:
         raise NotImplementedError("Error, unknown input focal shape format.")
 
-    assert pseudo_focalx.shape == depth.shape[:3]
-    assert pseudo_focaly.shape == depth.shape[:3]
+    # assert pseudo_focalx.shape == depth.shape[:3]
+    # assert pseudo_focaly.shape == depth.shape[:3]
     grid_x, grid_y = xy_grid(W, H, cat_dim=0, device=depth.device)[:, None]
+    # grid = xy_grid(W, H, cat_dim=0, device=depth.device)
 
     # set principal point
     if pp is None:
@@ -150,6 +290,7 @@ def depthmap_to_pts3d(depth, pseudo_focal, pp=None, **_):
         grid_y = grid_y.expand(B, -1, -1) - pp[:, 1, None, None]
 
     if n is None:
+        # depth: B,H,W, focal: B,H,W or B,1,1
         pts3d = torch.empty((B, H, W, 3), device=depth.device)
         pts3d[..., 0] = depth * grid_x / pseudo_focalx
         pts3d[..., 1] = depth * grid_y / pseudo_focaly

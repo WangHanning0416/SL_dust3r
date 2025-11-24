@@ -1,9 +1,4 @@
-# Copyright (C) 2024-present Naver Corporation. All rights reserved.
-# Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
-#
-# --------------------------------------------------------
-# Implementation of DUSt3R training losses
-# --------------------------------------------------------
+## 用于view2换pattern使用的去除pattern路loss的文件
 from copy import copy, deepcopy
 import torch
 import torch.nn as nn

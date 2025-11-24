@@ -1,4 +1,4 @@
-# encoder decoder注入
+# view2改为pattern 简化pattern路的encoder
 from copy import deepcopy
 import torch
 import os
@@ -18,10 +18,7 @@ import cv2
 inf = float('inf')
 
 hf_version_number = huggingface_hub.__version__
-assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated huggingface_hub version, " "please reinstall requirements.txt")
-
-DECODER = False
-ENCODER = True                                                      
+assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated huggingface_hub version, " "please reinstall requirements.txt")                                                          
 
 def load_model(model_path, device, verbose=True):
     if verbose:
@@ -74,22 +71,14 @@ class AsymmetricCroCo3DStereo (
         self.attn_save_dir = "/data3/hanning/dust3r/cross_attn_npy"
         self.img_size = croco_kwargs.get('img_size', 224)
         self.patch_size = croco_kwargs.get('patch_size', 16)
-        if ENCODER:
-            self.pattern_encoder_embed = PatchEmbed_Mlp(
-                img_size=self.img_size,
-                patch_size=self.patch_size,
-                in_chans=3,
-                embed_dim=self.enc_embed_dim,  
-                flatten=True 
-            )
-        if DECODER:
-            self.pattern_decoder_embed = PatchEmbed_Mlp(
-                img_size=self.img_size,
-                patch_size=self.patch_size,
-                in_chans=3,
-                embed_dim=self.dec_embed_dim,  
-                flatten=True 
-            )
+
+        self.pattern_encoder_embed = PatchEmbed_Mlp(
+            img_size=self.img_size,
+            patch_size=self.patch_size,
+            in_chans=3,
+            embed_dim=self.enc_embed_dim,  
+            flatten=True 
+        )
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -141,42 +130,25 @@ class AsymmetricCroCo3DStereo (
 
     def _encode_image(self, image, true_shape):
         x, pos = self.patch_embed(image, true_shape=true_shape)
-        if ENCODER:
-            B = x.shape[0]
-            pattern_path = "/data/hanning/SL_dust3r/tools/kinectsp_crop.png"
-            pattern = cv2.imread(pattern_path)
-            device = x.device
-            pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0  # (3, H, W)
-            pattern = pattern.unsqueeze(0).to(device)
-            pattern = pattern.repeat(B, 1, 1, 1)  # (B, 3, H, W)
-            pattern_embed,pos_embed = self.pattern_encoder_embed(pattern)  # (B, N, enc_embed_dim)
-            x += pattern_embed
-        total_blocks = len(self.enc_blocks)
-        half_blocks = total_blocks // 2
+
         for i,blk in enumerate(self.enc_blocks):
             x = blk(x, pos)
-            if ENCODER and i <= half_blocks:
-                x += pattern_embed
         x = self.enc_norm(x)
         return x, pos, None
 
     def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2):
-        if img1.shape[-2:] == img2.shape[-2:]:
-            out, pos, _ = self._encode_image(torch.cat((img1, img2), dim=0),
-                                             torch.cat((true_shape1, true_shape2), dim=0))
-            out, out2 = out.chunk(2, dim=0)
-            pos, pos2 = pos.chunk(2, dim=0)
-        else:
-            out, pos, _ = self._encode_image(img1, true_shape1)
-            out2, pos2, _ = self._encode_image(img2, true_shape2)
+        out, pos, _ = self._encode_image(img1, true_shape1)
+        out2, pos2 = self.pattern_encoder_embed(img2)
         return out, out2, pos, pos2
 
     def _encode_symmetrized(self, view1, view2):
         img1 = view1['img']
         img2 = view2['img']
         B = img1.shape[0]
+        # Recover true_shape when available, otherwise assume that the img shape is the true one
         shape1 = view1.get('true_shape', torch.tensor(img1.shape[-2:])[None].repeat(B, 1))
         shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
+
         if is_symmetrized(view1, view2):
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1[::2], img2[::2], shape1[::2], shape2[::2])
             feat1, feat2 = interleave(feat1, feat2)
@@ -185,54 +157,37 @@ class AsymmetricCroCo3DStereo (
             feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1, img2, shape1, shape2)
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)
-
+        
     def _decoder(self, f1, pos1, f2, pos2):
         final_output = [(f1, f2)]
         f1 = self.decoder_embed(f1)
         f2 = self.decoder_embed(f2)
-        if DECODER:
-            B = f1.shape[0]
-            pattern_path = "/data/hanning/SL_dust3r/tools/kinectsp_crop.png"
-            pattern = cv2.imread(pattern_path)
-            device = f1.device
-            pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0  # (3, H, W)
-            pattern = pattern.unsqueeze(0).to(device)
-            pattern = pattern.repeat(B, 1, 1, 1)  # (B, 3, H, W)
-            pattern_embed,pos_embed = self.pattern_decoder_embed(pattern)  # (B, N, enc_embed_dim)
-            f1 += pattern_embed
-            f2 += pattern_embed
 
         final_output.append((f1, f2))
-        i = 0
         for blk_idx,(blk1, blk2) in enumerate(zip(self.dec_blocks, self.dec_blocks2)):
             f1, _ ,attn_map1= blk1(*final_output[-1][::+1], pos1, pos2)
             f2, _ ,attn_map2= blk2(*final_output[-1][::-1], pos2, pos1)
-            # os.makedirs(os.path.join(self.attn_save_dir, f"layer_{blk_idx}"), exist_ok=True)
-            # save_path_f1 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img1_to_img2_attn.npy")
-            # save_path_f2 = os.path.join(self.attn_save_dir, f"layer_{blk_idx}/img2_to_img1_attn.npy")
-            # attn_map1 = attn_map1.detach().cpu().numpy()
-            # attn_map2 = attn_map2.detach().cpu().numpy()
-            # np.save(save_path_f1, attn_map1)
-            # np.save(save_path_f2, attn_map2)
-            # store the result
-            if DECODER:
-                if i < 6:
-                    f1 += pattern_embed
-                    f2 += pattern_embed
-                i += 1
             final_output.append((f1, f2))
-        del final_output[1]  # duplicate with final_output[0]
+        del final_output[1]  
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
         return zip(*final_output)
 
     def _downstream_head(self, head_num, decout, img_shape):
         B, S, D = decout[-1].shape
-        # img_shape = tuple(map(int, img_shape))
         head = getattr(self, f'head{head_num}')
         return head(decout, img_shape)
 
     def forward(self, view1, view2):
-        (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
+        B = view1['img'].shape[0]
+        pattern_path = "/data/hanning/SL_dust3r/tools/kinectsp_crop.png"
+        pattern = cv2.imread(pattern_path)
+        device = view1['img'].device
+        pattern = torch.tensor(pattern, dtype=torch.float32).permute(2, 0, 1) / 255.0
+        pattern = pattern.unsqueeze(0).to(device)
+        pattern = pattern.repeat(B, 1, 1, 1)
+        view2['img'] = pattern
+
+        (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1,view2)
 
         dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
 

@@ -1,13 +1,3 @@
-# Copyright (C) 2022-present Naver Corporation. All rights reserved.
-# Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
-
-
-# --------------------------------------------------------
-# CroCo model during pretraining
-# --------------------------------------------------------
-
-
-
 import torch
 import torch.nn as nn
 torch.backends.cuda.matmul.allow_tf32 = True # for gpu >= Ampere and pytorch >= 1.12
@@ -77,21 +67,21 @@ class CroCoNet(nn.Module):
         # decoder 
         self._set_decoder(enc_embed_dim, dec_embed_dim, dec_num_heads, dec_depth, mlp_ratio, norm_layer, norm_im2_in_dec)
         
-        self.pattern_encoder_fusor1 = nn.ModuleList([
-            FeatureFusionBlock(enc_embed_dim, enc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
-            for i in range(6)])
-        self.pattern_encoder_fusor2 = nn.ModuleList([
-            FeatureFusionBlock(enc_embed_dim, enc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
-            for i in range(6)])
+        # self.pattern_encoder_fusor1 = nn.ModuleList([
+        #     FeatureFusionBlock(enc_embed_dim, enc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+        #     for i in range(6)])
+        # self.pattern_encoder_fusor2 = nn.ModuleList([
+        #     FeatureFusionBlock(enc_embed_dim, enc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+        #     for i in range(6)])
 
-        self.pattern_fusors1 = nn.ModuleList([
-            FeatureFusionBlock(dim=dec_embed_dim, num_heads=dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
-            for _ in range(6) 
-        ])
-        self.pattern_fusors2 = nn.ModuleList([
-            FeatureFusionBlock(dim=dec_embed_dim, num_heads=dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
-            for _ in range(6)
-        ])
+        # self.pattern_fusors1 = nn.ModuleList([
+        #     FeatureFusionBlock(dim=dec_embed_dim, num_heads=dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+        #     for _ in range(6) 
+        # ])
+        # self.pattern_fusors2 = nn.ModuleList([
+        #     FeatureFusionBlock(dim=dec_embed_dim, num_heads=dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, rope=self.rope)
+        #     for _ in range(6)
+        # ])
 
         self._set_prediction_head(dec_embed_dim, patch_size)
         self.initialize_weights()           
