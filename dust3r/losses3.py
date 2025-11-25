@@ -1,7 +1,8 @@
-## 原版的loss
+# 对pattern路加额外设计的约束
 from copy import copy, deepcopy
 import torch
 import torch.nn as nn
+import numpy as np
 
 from dust3r.inference import get_pred_pts3d, find_opt_scaling
 from dust3r.utils.geometry import inv, geotrf, normalize_pointcloud
@@ -29,7 +30,6 @@ class BaseCriterion(nn.Module):
 class LLoss (BaseCriterion):
     """ L-norm loss
     """
-
     def forward(self, a, b):
         assert a.shape == b.shape and a.ndim >= 2 and 1 <= a.shape[-1] <= 3, f'Bad shape = {a.shape}'
         dist = self.distance(a, b)
@@ -178,15 +178,119 @@ class Regr3D (Criterion, MultiLoss):
         return gt_pts1, gt_pts2, pr_pts1, pr_pts2, valid1, valid2, {}
 
     def compute_loss(self, gt1, gt2, pred1, pred2, **kw):
-        gt_pts1, gt_pts2, pred_pts1, pred_pts2, mask1, mask2, monitoring = \
-            self.get_all_pts3d(gt1, gt2, pred1, pred2, **kw)
-        # loss on img1 side
-        l1 = self.criterion(pred_pts1[mask1], gt_pts1[mask1])
-        # loss on gt2 side
-        l2 = self.criterion(pred_pts2[mask2], gt_pts2[mask2])
+        # 检查view2是否是pattern view
+        # gt2是字典，每个key对应batch的tensor或列表
+        is_pattern_view = False
+        if isinstance(gt2, dict) and 'is_pattern_view' in gt2:
+            pattern_view_val = gt2['is_pattern_view']
+            if isinstance(pattern_view_val, torch.Tensor):
+                is_pattern_view = pattern_view_val[0].item() if pattern_view_val.numel() > 0 else False
+            elif isinstance(pattern_view_val, (list, tuple)):
+                is_pattern_view = pattern_view_val[0] if len(pattern_view_val) > 0 else False
+            else:
+                is_pattern_view = bool(pattern_view_val)
+        
+        if is_pattern_view:
+            # view2是pattern view，使用投影仪深度图监督
+            return self.compute_loss_pattern_view(gt1, gt2, pred1, pred2, **kw)
+        else:
+            # 正常的view2，使用点云监督
+            gt_pts1, gt_pts2, pred_pts1, pred_pts2, mask1, mask2, monitoring = \
+                self.get_all_pts3d(gt1, gt2, pred1, pred2, **kw)
+            # loss on img1 side
+            l1 = self.criterion(pred_pts1[mask1], gt_pts1[mask1])
+            # loss on gt2 side
+            l2 = self.criterion(pred_pts2[mask2], gt_pts2[mask2])
+            self_name = type(self).__name__
+            details = {self_name + '_pts3d_1': float(l1.mean()), self_name + '_pts3d_2': float(l2.mean())}
+            return Sum((l1, mask1), (l2, mask2)), (details | monitoring)
+    
+    def compute_loss_pattern_view(self, gt1, gt2, pred1, pred2, **kw):
+        """处理view2是pattern view的情况，使用投影仪深度图监督
+        
+        view2的配置：
+        - 输入：pattern图像（投影仪视角）
+        - camera_intrinsics：投影仪内参
+        - camera_pose：单位矩阵（投影仪坐标系）
+        - 输出：投影仪坐标系下的深度图（每个pattern点对应的RGB点在投影仪坐标系下的深度）
+        - GT：投影仪坐标系下的深度图（projector_depthmap_from_pattern_view）
+        """
+        # view1的loss：正常的点云loss（独立计算，不依赖view2）
+        in_camera1 = inv(gt1['camera_pose'])
+        gt_pts1 = geotrf(in_camera1, gt1['pts3d'])  # B,H,W,3
+        valid1 = gt1['valid_mask'].clone()
+        
+        pr_pts1 = get_pred_pts3d(gt1, pred1, use_pose=False)
+        
+        # normalize 3d points for view1（独立归一化，不依赖view2）
+        if self.norm_mode:
+            pr_pts1, _ = normalize_pointcloud(pr_pts1, None, self.norm_mode, valid1, None)
+        if self.norm_mode and not self.gt_scale:
+            gt_pts1, _ = normalize_pointcloud(gt_pts1, None, self.norm_mode, valid1, None)
+        
+        # view1 loss
+        l1 = self.criterion(pr_pts1[valid1], gt_pts1[valid1])
+        
+        # view2的loss：投影仪深度图loss（投影仪坐标系下的深度）
+        if 'projector_depth' in pred2 and 'projector_depthmap_from_pattern_view' in gt2:
+            pred_depth = pred2['projector_depth']  # (B, H, W) 预测的投影仪坐标系下的深度
+            gt_depth = gt2['projector_depthmap_from_pattern_view']  # (H, W) GT投影仪坐标系下的深度
+            pattern_valid_mask = gt2.get('pattern_valid_mask', None)  # 可能是(H, W), (B, H, W), list, 或tensor
+            
+            # 处理gt_depth：可能是list, numpy array, 或tensor
+            if isinstance(gt_depth, (list, tuple)):
+                # 如果是列表，取第一个并转换为tensor
+                gt_depth = gt_depth[0] if len(gt_depth) > 0 else None
+            if gt_depth is not None:
+                if isinstance(gt_depth, np.ndarray):
+                    gt_depth = torch.from_numpy(gt_depth).to(pred_depth.device)
+                elif not isinstance(gt_depth, torch.Tensor):
+                    gt_depth = torch.tensor(gt_depth).to(pred_depth.device)
+                # 确保batch维度
+                if gt_depth.ndim == 2:
+                    gt_depth = gt_depth.unsqueeze(0)  # (1, H, W)
+                # 确保batch size匹配
+                if gt_depth.shape[0] != pred_depth.shape[0]:
+                    gt_depth = gt_depth.expand(pred_depth.shape[0], -1, -1)  # (B, H, W)
+            
+            # 处理pattern_valid_mask
+            if pattern_valid_mask is not None:
+                if isinstance(pattern_valid_mask, (list, tuple)):
+                    pattern_valid_mask = pattern_valid_mask[0] if len(pattern_valid_mask) > 0 else None
+                if pattern_valid_mask is not None:
+                    if isinstance(pattern_valid_mask, np.ndarray):
+                        pattern_valid_mask = torch.from_numpy(pattern_valid_mask).to(pred_depth.device)
+                    elif not isinstance(pattern_valid_mask, torch.Tensor):
+                        pattern_valid_mask = torch.tensor(pattern_valid_mask).to(pred_depth.device)
+                    # 确保batch维度
+                    if pattern_valid_mask.ndim == 2:
+                        pattern_valid_mask = pattern_valid_mask.unsqueeze(0)  # (1, H, W)
+                    # 确保batch size匹配
+                    if pattern_valid_mask.shape[0] != pred_depth.shape[0]:
+                        pattern_valid_mask = pattern_valid_mask.expand(pred_depth.shape[0], -1, -1)  # (B, H, W)
+            
+            # 创建有效掩码（非nan且pattern有效）
+            valid2 = torch.isfinite(gt_depth) & (gt_depth > 1e-6)
+            if pattern_valid_mask is not None:
+                valid2 = valid2 & pattern_valid_mask
+            
+            # 计算深度loss
+            if valid2.any():
+                # 使用L1或L2 loss
+                depth_loss = torch.abs(pred_depth - gt_depth)
+                l2 = depth_loss[valid2].mean()
+            else:
+                l2 = torch.tensor(0.0, device=pred_depth.device)
+        else:
+            # 如果没有投影仪深度图，返回0 loss
+            l2 = torch.tensor(0.0, device=pred1['pts3d'].device)
+        
         self_name = type(self).__name__
-        details = {self_name + '_pts3d_1': float(l1.mean()), self_name + '_pts3d_2': float(l2.mean())}
-        return Sum((l1, mask1), (l2, mask2)), (details | monitoring)
+        details = {
+            self_name + '_pts3d_1': float(l1.mean()) if l1.numel() > 0 else 0.0,
+            self_name + '_projector_depth_2': float(l2.item()) if isinstance(l2, torch.Tensor) else float(l2)
+        }
+        return l1 + 0.5 * l2, details
 
 
 class ConfLoss (MultiLoss):
@@ -236,16 +340,19 @@ class ConfLoss (MultiLoss):
 class Regr3D_ShiftInv (Regr3D):
     """ Same than Regr3D but invariant to depth shift.
     """
+
     def get_all_pts3d(self, gt1, gt2, pred1, pred2):
         # compute unnormalized points
         gt_pts1, gt_pts2, pred_pts1, pred_pts2, mask1, mask2, monitoring = \
             super().get_all_pts3d(gt1, gt2, pred1, pred2)
 
+        # compute median depth
         gt_z1, gt_z2 = gt_pts1[..., 2], gt_pts2[..., 2]
         pred_z1, pred_z2 = pred_pts1[..., 2], pred_pts2[..., 2]
         gt_shift_z = get_joint_pointcloud_depth(gt_z1, gt_z2, mask1, mask2)[:, None, None]
         pred_shift_z = get_joint_pointcloud_depth(pred_z1, pred_z2, mask1, mask2)[:, None, None]
 
+        # subtract the median depth
         gt_z1 -= gt_shift_z
         gt_z2 -= gt_shift_z
         pred_z1 -= pred_shift_z

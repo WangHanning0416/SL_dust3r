@@ -1,7 +1,4 @@
-# dust3r 注入depthmap raymap
-# dust3r_kinectsp_224_embed_depthmap
-# dust3r_kinectsp_224_inject_depthmap  inject[0,0.5]
-# dust3r_kinectsp_224_embed_ray
+# dust3r 注入pose
 
 from copy import deepcopy
 import torch
@@ -53,6 +50,10 @@ def load_model(model_path, device, verbose=True):
         print(s)
     return net.to(device)
 
+def cat_cls(cls, tokens, pos):
+    tokens = torch.cat((cls, tokens), dim=1)
+    pos = torch.cat((-pos.new_ones(len(cls), 1, 2), pos), dim=1)
+    return tokens, pos
 
 class AsymmetricCroCo3DStereo (
     CroCoNet,
@@ -72,7 +73,7 @@ class AsymmetricCroCo3DStereo (
                  depth_mode=('exp', -inf, inf),
                  conf_mode=('exp', 1, inf),
                  freeze='none',
-                 mode='inject[0,0.5]',
+                 mode='embed',
                  landscape_only=True,
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
                  **croco_kwargs):
@@ -89,9 +90,15 @@ class AsymmetricCroCo3DStereo (
         self.set_freeze(freeze)
         self.patch_embed_rays = get_patch_embed(patch_embed_cls+'_Mlp', self.img_size, self.patch_size, self.enc_embed_dim, in_chans=3)
         self.depth_embed = get_patch_embed(patch_embed_cls+'_Mlp', self.img_size, self.patch_size, self.enc_embed_dim, in_chans=2)
-        self.patch_ln = nn.LayerNorm(enc_dim)
 
-        self.replace_some_blocks()
+        self.pose_embed = Mlp(12, 4*dec_dim, dec_dim)
+        self.dec_cls = True
+
+        use_ln = '_ln' in self.mode 
+        self.patch_ln = nn.LayerNorm(enc_dim) if use_ln else nn.Identity()
+        self.dec1_pre_ln = nn.LayerNorm(dec_dim) if use_ln else nn.Identity()
+        self.dec2_pre_ln = nn.LayerNorm(dec_dim) if use_ln else nn.Identity()
+
         
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -107,37 +114,6 @@ class AsymmetricCroCo3DStereo (
     def _set_patch_embed(self, img_size=224, patch_size=16, enc_embed_dim=768):
         self.patch_size = patch_size
         self.patch_embed = get_patch_embed(self.patch_embed_cls, img_size, patch_size, enc_embed_dim)
-    
-    def replace_some_blocks(self):
-        if not self.mode.startswith('inject'):
-            return
-        NewBlock = BlockInject
-        # DecoderNewBlock = DecoderBlockInject
-        all_layers = {i/n for i in range(len(self.enc_blocks)) for n in [len(self.enc_blocks), len(self.dec_blocks)]}
-        which_layers = eval(self.mode[self.mode.find('['):]) or all_layers
-        print("which_layers:",which_layers)
-        assert isinstance(which_layers, (set,list))
-        n = 0
-        for i, block in enumerate(self.enc_blocks):
-            print(i/len(self.enc_blocks))
-            if i/len(self.enc_blocks) in which_layers: 
-                print('modifying encoder block',i)
-                block.__class__ = NewBlock
-                block.init(self.enc_embed_dim)
-                n += 1
-
-        assert n == len(which_layers), breakpoint()
-        print("replace blocks")
-        # n = 0
-        # for i in range(len(self.dec_blocks)):
-        #     for blocks in [self.dec_blocks, self.dec_blocks2]:
-        #         block = blocks[i]
-        #         if i/len(self.dec_blocks) in which_layers: 
-        #             print('modifying decoder block',i)
-        #             block.__class__ = DecoderNewBlock
-        #             block.init(self.dec_embed_dim)
-        #             n += 1
-        # assert n == 2*len(which_layers), breakpoint()
 
     def load_state_dict(self, ckpt, **kw):
         new_ckpt = dict(ckpt)
@@ -177,26 +153,9 @@ class AsymmetricCroCo3DStereo (
 
     def _encode_image(self, image, true_shape, rays=None, depth=None):
         x, pos = self.patch_embed(image, true_shape=true_shape)
-        # if rays is not None: # B,3,H,W
-        #     rays_emb, pos2 = self.patch_embed_rays(rays, true_shape=true_shape)
-        #     assert (pos == pos2).all()
-        #     if self.mode.startswith('embed'):
-        #         # print("ooo") 
-        #         x = x + rays_emb
-        # else:
-        rays_emb = None
-
-        if depth is not None: # B,2,H,W
-            depth_emb, pos2 = self.depth_embed(depth, true_shape=true_shape)
-            assert (pos == pos2).all()
-            if self.mode.startswith('embed'): 
-                x = x + depth_emb
-        else:
-            depth_emb = None
-        x = self.patch_ln(x)
         assert self.enc_pos_embed is None
         for blk in self.enc_blocks:
-            x = blk(x, pos, rays=rays_emb, depth=depth_emb)
+            x = blk(x, pos)
         x = self.enc_norm(x)
         return x, pos
 
@@ -224,18 +183,43 @@ class AsymmetricCroCo3DStereo (
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)
 
 
-    def _decoder(self, f1, pos1, f2, pos2):
-        final_output = [(f1, f2)]  
+    def _decoder(self, f1, pos1, f2, pos2, relpose1=None, relpose2=None):
+        final_output = [(f1, f2)] # before projection
+
+        # project to decoder dim
         f1 = self.decoder_embed(f1)
         f2 = self.decoder_embed(f2)
 
-        final_output.append((f1, f2))
+        if relpose1 is not None: # shape = (B, 4, 4)
+            if isinstance(relpose1, np.ndarray):
+                relpose1 = torch.from_numpy(relpose1).to(f1.device).unsqueeze(0)   
+            pose_emb1 = self.pose_embed(relpose1[:,:3].flatten(1)).unsqueeze(1)
+            f1 = f1 + pose_emb1
+        else:
+            pose_emb1 = None
+
+        if relpose2 is not None:
+            if isinstance(relpose2, np.ndarray):
+                relpose2 = torch.from_numpy(relpose2).to(f1.device).unsqueeze(0)  
+            pose_emb2 = self.pose_embed(relpose2[:,:3].flatten(1)).unsqueeze(1)
+            f2 = f2 + pose_emb2
+        else:
+            pose_emb2 = None
+
+        f1 = self.dec1_pre_ln(f1)
+        f2 = self.dec2_pre_ln(f2)
+
+        final_output.append((f1, f2)) # to be removed later
         for blk1, blk2 in zip(self.dec_blocks, self.dec_blocks2):
-            f1 , attn_map1 = blk1(*final_output[-1][::+1], pos1, pos2)
-            f2 , attn_map2 = blk2(*final_output[-1][::-1], pos2, pos1)
-            final_output.append((f1, f2))
+            # img1 side
+            f1, _ = blk1(*final_output[-1][::+1], pos1, pos2)
+            # img2 side
+            f2, _ = blk2(*final_output[-1][::-1], pos2, pos1)
+            # store the result
+            final_output.append((f1,f2))
 
         del final_output[1] 
+
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
         return zip(*final_output)
 
@@ -244,12 +228,13 @@ class AsymmetricCroCo3DStereo (
         head = getattr(self, f'head{head_num}')
         return head(decout, img_shape)
 
-    def forward(self, view1, view2):
+    def forward(self, view1, view2 ):
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
-        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
+        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2, 
+                            relpose1=view1.get('known_pose'), relpose2=view2.get('known_pose'))
         with torch.cuda.amp.autocast(enabled=False):
             res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
 
-        res2['pts3d_in_other_view'] = res2.pop('pts3d')  # predict view2's pts3d in view1's frame
+        res2['pts3d_in_other_view'] = res2.pop('pts3d') # predict view2's pts3d in view1's frame
         return res1, res2

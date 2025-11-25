@@ -14,7 +14,7 @@ from dust3r.utils.modalities import gen_sparse_depth,gen_rays,gen_rel_pose
 
 
 CONFIG = {
-    "model_weight_path": "/nvme/data/hanning/checkpoints/dust3r_kinectsp_224_inject_depthmap/checkpoint-best.pth",
+    "model_weight_path": "/nvme/data/hanning/checkpoints/dust3r_kinectsp_224_inject_pose/checkpoint-best.pth",
     "resolution": 224,
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
@@ -179,8 +179,7 @@ def process_image_pair(model, image1_path, image2_path, depth1_path, depth2_path
     # 执行推理
     with torch.no_grad():
         res1, res2 = model(view1_for_model, view2_for_model)
-
-    # 处理预测点云
+        
     pred_pts, pred_colors = filter_point_cloud(
         res1["pts3d"].squeeze(0).cpu().numpy(),
         view1_for_model, # 包含已加载图像的视图

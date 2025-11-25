@@ -17,8 +17,8 @@ from evaluation.eval import evaluate_scene_data
 
 # 核心配置
 CONFIG = {
-    "model_weight_path": "/nvme/data/hanning/checkpoints/dust3r_kinectsp_224_inject_pose_nonorm/checkpoint-best.pth",
-    "resolution": 224, 
+    "model_weight_path": "/nvme/data/hanning/checkpoints/dust3r_kinectsp_224_inject_pose/checkpoint-best.pth",
+    "resolution": 224,  
     "device": "cuda" if torch.cuda.is_available() else "cpu",
     "conf_threshold": 0.3,
     "base_result_dir": "/data/hanning/dust3r/result_rgb/",
@@ -164,13 +164,10 @@ def process_view(img_path, depth_path, intrinsics, camera_pose ,resolution, rng,
 
     # ImgNorm 将 PIL.Image 转换为 PyTorch Tensor 并进行归一化
     view['img'] = ImgNorm(view['img'])
-
-    # --- 6. 计算 GT 3D 点云 (pts3d) ---
-
     pts3d, valid_mask = depthmap_to_absolute_camera_coordinates(
         depthmap=view['depthmap'],
         camera_intrinsics=view['camera_intrinsics'],
-        camera_pose=view['camera_pose']
+        camera_pose=np.eye(4, dtype=np.float32)
     )
     view['pts3d'] = pts3d
     view['valid_mask'] = valid_mask & np.isfinite(pts3d).all(axis=-1)

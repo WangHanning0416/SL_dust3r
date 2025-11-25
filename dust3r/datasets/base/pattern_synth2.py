@@ -1,4 +1,4 @@
-#正常结构光合成
+#用于制造：view1是正常的结构光数据集，view2被替换为pattern且相应地增加一些量用于后续的监督用
 import numpy as np
 import megfile
 import torch
@@ -13,7 +13,7 @@ from dust3r.utils.geometry import warp_coord, intrinsics_from_fov, extrinsics_fr
 from dust3r.utils.config import load_config, random_sample_properties_from_config
 from dust3r.datasets.utils.cropping import resize_crop_img_tensor
 
-# TODO: 考虑竖幅图片的情况，它到底是什么时候变成横幅的，intrinsics又是什么时候变的！！
+
 class PatternSynthMixin:
     def initialize_pattern_config(self, config:Union[dict, str], split:str, **kwargs):
         '''config can be overwritten by kwargs.'''
@@ -46,41 +46,163 @@ class PatternSynthMixin:
             self.invariancy_before = self.cross_view_invariant
             self._toggle_cross_view_invariant(True)
 
-        # dynamically create a new container class to override the __getitem__.
         class PatternSynthPatched(self._original_class):
             def __getitem__(self, idx):
-                '''CAUTION: 当多视角间内参不一致的时候怎么处理.?'''
                 views = super().__getitem__(idx)
                 cfgs = random_sample_properties_from_config(self.pattern_config)
                 pat = self.patterns[cfgs['pattern_idx']].clone()
+                
+                # 获取最终图像尺寸 H, W
+                H, W = views[0]['img'].shape[-2:]
                 # resize and crop pat first !
-                pat = resize_crop_img_tensor(pat, views[0]['img'].shape[-2:])
+                pat = resize_crop_img_tensor(pat, (H, W))
 
-                new_views = []
-                for view in views:
-                    img = view['img'] * 0.5 + 0.5  # unnormalized.
-                    dep = view['depthmap']
+                # 先处理view1，计算投影仪深度图
+                view1 = views[0]
+                img1 = view1['img'] * 0.5 + 0.5  # unnormalized.
+                dep1 = view1['depthmap'] # (H, W)
+                cam_fov = fov_from_intrinsics(view1['camera_intrinsics'])
+                proj_fov = cfgs['fov'] + cam_fov
+                x_transl = cfgs['x_transl_abs'] * (1 if cfgs['x_transl_sign']==1 else -1)
+                
+                # Intri (K_proj)
+                proj_intri = intrinsics_from_fov(proj_fov, pat.shape[-2:])
+                # C2P Extri (T_c2p)
+                c2p = extrinsics_from_euler_transl(
+                    cfgs['x_rot'], cfgs['y_rot'], cfgs['z_rot'], 
+                    x_transl, cfgs['y_transl'], cfgs['z_transl'], degree=True, order='xyz'
+                )
 
-                    cam_fov = fov_from_intrinsics(view['camera_intrinsics'])
-                    proj_fov = cfgs['fov'] + cam_fov
-                    x_transl = cfgs['x_transl_abs'] * (1 if cfgs['x_transl_sign']==1 else -1)
-                    # intri
-                    proj_intri = intrinsics_from_fov(proj_fov, pat.shape[-2:])
-                    # c2p extri
-                    c2p = extrinsics_from_euler_transl(cfgs['x_rot'], cfgs['y_rot'], cfgs['z_rot'], x_transl, cfgs['y_transl'], cfgs['z_transl'], degree=True, order='xyz')
-                    img = structured_light_synthesize(
-                        img, dep, pat, dep > 0, view['camera_intrinsics'], proj_intri, c2p,
-                        cfgs['gamma'], cfgs['alpha'], cfgs['beta'], None, cfgs['noise_scale']
-                    )[0] * 2 - 1  # normalize. discard warpped pattern.
-                    view.update(dict(
-                        img=img, pat=pat * 2 - 1, 
-                        proj_intrinsics=proj_intri, c2p=c2p,
-                        gamma=cfgs['gamma'], alpha=cfgs['alpha'], beta=cfgs['beta'], noise_scale=cfgs['noise_scale']
+                synthesized_img, warpped_pattern = structured_light_synthesize(
+                    img1, dep1, pat, dep1 > 0, view1['camera_intrinsics'], proj_intri, c2p,
+                    cfgs['gamma'], cfgs['alpha'], cfgs['beta'], None, cfgs['noise_scale']
+                )
+                
+                img1 = synthesized_img * 2 - 1
+                
+                # 计算投影仪深度图（用于view2的监督）
+                cam_intri = view1['camera_intrinsics']
+                depth_np = dep1
+                K_cam_np = cam_intri
+                c2p_np = c2p # 4x4 T_c2p
+                R_cp = c2p_np[:3, :3]
+                t_cp = c2p_np[:3, 3].reshape(3, 1)
+
+                u, v = np.meshgrid(np.arange(W), np.arange(H))
+                points_2d = np.stack([u.flatten(), v.flatten(), np.ones(H*W)], axis=1).T
+                K_cam_inv = np.linalg.inv(K_cam_np)
+                P_normalized = K_cam_inv @ points_2d
+                depth_flat = depth_np.flatten()
+                valid_depth_mask = depth_flat > 1e-6 
+                P_normalized_valid = P_normalized[:, valid_depth_mask]
+                depth_valid = depth_flat[valid_depth_mask]
+                P_c_valid = P_normalized_valid * depth_valid
+                
+                # 2. 变换到投影仪坐标系 (P_p)
+                P_p_valid = (R_cp @ P_c_valid) + t_cp
+                if not isinstance(P_p_valid, np.ndarray):
+                    # 如果它是 Tensor，先转 numpy
+                    P_p_valid = P_p_valid.cpu().numpy() if P_p_valid.is_cuda else P_p_valid.numpy()
+                
+                K_proj_np = proj_intri.cpu().numpy() 
+                P_proj_2d_homo = K_proj_np @ P_p_valid
+                Z_p = P_proj_2d_homo[2, :]
+        
+                final_projection_mask = Z_p > 1e-6 
+                P_p_filtered_by_z = P_p_valid[:, final_projection_mask]
+                P_proj_2d_valid = P_proj_2d_homo[:, final_projection_mask]
+                Z_p_final = Z_p[final_projection_mask]
+                
+                u_proj = P_proj_2d_valid[0, :] / Z_p_final
+                v_proj = P_proj_2d_valid[1, :] / Z_p_final
+
+                valid_pattern_bounds_mask = (u_proj >= 0) & (u_proj < W) & (v_proj >= 0) & (v_proj < H)
+
+                depth_valid_indices = np.where(valid_depth_mask)[0]
+                valid_projection_indices = np.where(final_projection_mask)[0]
+                final_valid_indices = depth_valid_indices[valid_projection_indices][np.where(valid_pattern_bounds_mask)[0]]
+
+                u_proj_final = u_proj[valid_pattern_bounds_mask]
+                v_proj_final = v_proj[valid_pattern_bounds_mask]
+                
+                coords_int_pat = np.round(np.stack([u_proj_final, v_proj_final], axis=1)).astype(np.int32)
+                coords_int_pat[:, 0] = np.clip(coords_int_pat[:, 0], 0, W - 1)
+                coords_int_pat[:, 1] = np.clip(coords_int_pat[:, 1], 0, H - 1)
+
+                pattern_final_valid_mask_HW = np.zeros((H, W), dtype=bool) # 尺寸为 H x W
+
+                pattern_final_valid_mask_HW[coords_int_pat[:, 1], coords_int_pat[:, 0]] = True
+                
+                dense_projector_coords_3d = np.full((H*W, 3), np.nan, dtype=np.float32)
+                P_p_final_coords = P_p_filtered_by_z.T[valid_pattern_bounds_mask, :] 
+                dense_projector_coords_3d[final_valid_indices] = P_p_final_coords
+                dense_projector_coords_3d = dense_projector_coords_3d.reshape(H, W, 3)
+                
+                projector_depthmap_from_pattern_view = np.full((H, W), np.nan, dtype=np.float32)
+                
+                Z_p_final_coords = P_p_filtered_by_z[2, :][valid_pattern_bounds_mask]
+
+                projector_depthmap_from_pattern_view[coords_int_pat[:, 1], coords_int_pat[:, 0]] = Z_p_final_coords
+
+                # 更新view1
+                view1.update(dict(
+                    img=img1, 
+                    pat=pat * 2 - 1, 
+                    proj_intrinsics=proj_intri, 
+                    # --- [修改: 添加 known_pose] ---
+                    known_pose=c2p.cpu().numpy().astype(np.float32), 
+                    # --- [修改结束] ---
+                    c2p=c2p,
+                    gamma=cfgs['gamma'], alpha=cfgs['alpha'], beta=cfgs['beta'], noise_scale=cfgs['noise_scale'],
+                    # 输出 1 (相机视图索引): Pattern 上的有效性掩码 (H_Pat x W_Pat)
+                    pattern_valid_mask=pattern_final_valid_mask_HW.astype(np.bool_), 
+                    # 输出 2 (相机视图索引): view1每个点对应的深度 (H_RGB x W_RGB x 3)
+                    projector_coords_3d=dense_projector_coords_3d.astype(np.float32),
+                ))
+                
+                new_views = [view1]
+                
+                # 处理view2：使用pattern图像，完全在投影仪坐标系下
+                if len(views) > 1:
+                    view2 = views[1]
+                    # view2使用pattern图像
+                    img2 = pat * 2 - 1  # pattern图像，归一化到[-1, 1]
+                    
+                    # 为view2创建depthmap：使用projector_depthmap_from_pattern_view
+                    # 由于camera_intrinsics是proj_intri，camera_pose是单位矩阵，
+                    # 所以BaseStereoViewDataset计算出的pts3d会在投影仪坐标系下
+                    # （虽然这个pts3d不会被使用，因为model.py中会删除它，只保留projector_depth）
+                    depthmap2 = projector_depthmap_from_pattern_view.copy()
+                    depthmap2[~pattern_final_valid_mask_HW] = 0  # 无效区域设为0
+                    depthmap2[~np.isfinite(depthmap2)] = 0  # nan区域设为0
+                    
+                    # view2更新：
+                    # 1. 使用pattern图像作为输入
+                    # 2. 将camera_intrinsics改为proj_intrinsics（投影仪内参），使模型在投影仪坐标系下工作
+                    # 3. camera_pose设为单位矩阵（因为view2在投影仪坐标系下，不需要额外的pose变换）
+                    # 4. depthmap使用投影仪深度图（这样计算出的pts3d会在投影仪坐标系下）
+                    # 5. 添加投影仪深度图作为监督信号（每个pattern点对应的RGB点在投影仪坐标系下的深度）
+                    view2.update(dict(
+                        img=img2,
+                        depthmap=depthmap2.astype(np.float32),  # 使用投影仪深度图作为depthmap
+                        pat=pat * 2 - 1,
+                        camera_intrinsics=proj_intri,  # 使用投影仪内参替代相机内参
+                        camera_pose=np.eye(4, dtype=np.float32),  # 单位矩阵，因为view2在投影仪坐标系下
+                        proj_intrinsics=proj_intri,
+                        c2p=c2p,
+                        gamma=cfgs['gamma'], alpha=cfgs['alpha'], beta=cfgs['beta'], noise_scale=cfgs['noise_scale'],
+                        projector_depthmap_from_pattern_view=projector_depthmap_from_pattern_view.astype(np.float32),
+                        # Pattern 上的有效性掩码
+                        pattern_valid_mask=pattern_final_valid_mask_HW.astype(np.bool_),
+                        # 标记这是pattern view
+                        is_pattern_view=True,
                     ))
-                    new_views.append(view)
+                    new_views.append(view2)
+                
                 return new_views
         
 
+        # point the instance's __class__ to our new PatchedClass
         self.__class__ = PatternSynthPatched
 
     def deinitialize(self):

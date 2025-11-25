@@ -60,7 +60,7 @@ def randint_logspace(rng, a, b, bias=1):
     return int(np.exp(r))
 
 
-def gen_rel_pose(views, norm=False):
+def gen_rel_pose(views, norm=True):
     assert len(views) == 2
     cam1_to_w, cam2_to_w = [view['camera_pose'] for view in views]
     w_to_cam1 = np.linalg.inv(cam1_to_w)

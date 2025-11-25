@@ -122,7 +122,7 @@ if __name__ == "__main__":
         aug_crop=16
     )
 
-    for idx in np.random.permutation(min(5, len(train_dataset))):
+    for idx in np.random.permutation(min(1, len(train_dataset))):
         views = train_dataset[idx]
         assert len(views) == 2
         print(f"train {idx}: {view_name(views[0])}, {view_name(views[1])}")
@@ -130,10 +130,12 @@ if __name__ == "__main__":
         viz = SceneViz()
         poses = [views[view_idx]['camera_pose'] for view_idx in [0, 1]]
         cam_size = max(auto_cam_size(poses), 0.001)
-        print("known_depth:",views[0]['known_depth'])
-        print("camera:",views[0]['camera_intrinsics'])
-        print("known_rays",views[0]['known_rays'])
+        # print("known_depth:",views[0]['known_depth'])
+        # print("camera:",views[0]['camera_intrinsics'])
+        # print("known_rays",views[0]['known_rays'])
+        print("camera_pose1:",views[0]['camera_pose'])
+        print("camera_pose2:",views[1]['camera_pose'])
         print("known_pose1",views[0]['known_pose'])
         print("known_pose2",views[1]['known_pose'])
-        print(views[0]['known_pose'] @ views[1]['known_pose'])
+        # print(views[0]['known_pose'] @ views[1]['known_pose'])
            
